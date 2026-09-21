@@ -186,10 +186,12 @@ mod imp {
     }
 
     /// 写工具要求已授权（对应 HTTP 侧 guard_auth 的 401）。
+    /// 走到这里说明没配 MCP API key（配了的话 [`guard_mcp_access`] 已在更外层把未授权请求挡掉），
+    /// 即实例设了访问密码而客户端没带有效凭证。
     fn require_full(access: Access) -> Result<(), ErrorData> {
         if access != Access::Full {
             return Err(ErrorData::invalid_request(
-                "需要登录：请在 MCP 客户端配置 `Authorization: Bearer <token>` 请求头",
+                "未授权：请在设置页 MCP 段生成 API key，并在客户端配置 `Authorization: Bearer <key>` 请求头",
                 None,
             ));
         }
@@ -505,16 +507,27 @@ mod imp {
         }
     }
 
-    /// 运行时开关：设置页可以随时把 MCP 关掉（存 config.db，默认开）。
-    /// router 只在启动时构建一次，所以开关必须在**请求时**查，不能在构建时分支。
-    /// 这个 layer 只挂在 MCP 子 router 上，不影响其它路由。
-    async fn guard_mcp_enabled(
+    /// MCP 端点的准入：运行时开关 + 独立 API key。只挂在 MCP 子 router 上，不影响其它路由。
+    /// router 只在启动时构建一次，故两者都必须在**请求时**查，不能在构建时分支。
+    ///
+    /// API key 是给 MCP **单独上的一把锁**，与浏览器会话解耦：
+    /// - 设了 key → `/mcp` 只认这把 key，带错/不带一律 401，**会话 token 也不行**。
+    ///   这样「配了 key」才等于「只有拿钥匙的进得来」——否则未设访问密码时设了 key 等于没设。
+    ///   校验通过即把 [`Access::Full`] 覆盖进请求扩展（guard_auth 先跑、给的是 Anonymous），
+    ///   工具层照常从扩展里取，无需感知 key 的存在。
+    /// - 没设 key → 维持原行为：guard_auth 算出的 Access 照旧（会话 token / 未设密码时恒 Full）。
+    ///
+    /// 万一 key 丢了也锁不死自己：设置页走的是普通的 `/api/mcp/config`，用浏览器身份即可重置。
+    async fn guard_mcp_access(
         axum::extract::State(state): axum::extract::State<Arc<AppState>>,
-        req: axum::extract::Request,
+        mut req: axum::extract::Request,
         next: axum::middleware::Next,
     ) -> axum::response::Response {
         use axum::response::IntoResponse as _;
-        let enabled = state.config.lock().unwrap().mcp_enabled();
+        let (enabled, key) = {
+            let cfg = state.config.lock().unwrap();
+            (cfg.mcp_enabled(), cfg.mcp_api_key())
+        };
         if !enabled {
             return (
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -524,6 +537,23 @@ mod imp {
                 })),
             )
                 .into_response();
+        }
+        if !key.is_empty() {
+            let ok = crate::api::bearer_token(req.headers())
+                .map(|t| crate::auth::secret_eq(&t, &key))
+                .unwrap_or(false);
+            if !ok {
+                tracing::warn!("mcp request rejected: missing or wrong api key");
+                return (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    AxumJson(serde_json::json!({
+                        "error": "mcp_unauthorized",
+                        "message": "MCP API key 不正确：请在客户端配置 `Authorization: Bearer <key>` 请求头（可在设置页 MCP 段复制完整命令）"
+                    })),
+                )
+                    .into_response();
+            }
+            req.extensions_mut().insert(Access::Full);
         }
         next.run(req).await
     }
@@ -538,6 +568,6 @@ mod imp {
         );
         Router::new()
             .nest_service(crate::api::MCP_PATH, service)
-            .layer(axum::middleware::from_fn_with_state(state, guard_mcp_enabled))
+            .layer(axum::middleware::from_fn_with_state(state, guard_mcp_access))
     }
 }

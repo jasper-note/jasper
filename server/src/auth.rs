@@ -207,6 +207,30 @@ pub fn gen_salt() -> String {
 	random_hex(16)
 }
 
+/// MCP API key 的固定前缀。让这串东西在配置文件/进程列表/日志里一眼能认出来源，
+/// 也方便将来做密钥扫描。
+pub const MCP_KEY_PREFIX: &str = "jasper_mcp_";
+
+/// 生成一枚 MCP API key（前缀 + 256 bit 随机 hex）。与会话 token 同强度，
+/// 但它是**长效**的：存 config.db，不随服务重启/浏览器登出失效。
+pub fn gen_mcp_key() -> String {
+	format!("{MCP_KEY_PREFIX}{}", random_hex(32))
+}
+
+/// 常数时间比较，避免按字节短路的比较泄露前缀匹配长度。
+/// 长度不同直接判否（长度本身不是秘密）。
+pub fn secret_eq(a: &str, b: &str) -> bool {
+	let (a, b) = (a.as_bytes(), b.as_bytes());
+	if a.len() != b.len() {
+		return false;
+	}
+	let mut diff = 0u8;
+	for (x, y) in a.iter().zip(b) {
+		diff |= x ^ y;
+	}
+	diff == 0
+}
+
 /// n 字节随机数 → 小写 hex。复用 `core::serialize::new_id` 同款 `getrandom` 0.2 自由函数。
 fn random_hex(n: usize) -> String {
 	let mut bytes = vec![0u8; n];
@@ -300,6 +324,21 @@ mod tests {
 		assert!(!state.valid_token(&t1) && state.valid_token(&t2));
 		state.revoke_all();
 		assert!(!state.valid_token(&t2));
+	}
+
+	#[test]
+	fn mcp_key_shape_and_constant_time_compare() {
+		let k1 = gen_mcp_key();
+		let k2 = gen_mcp_key();
+		assert!(k1.starts_with(MCP_KEY_PREFIX));
+		assert_eq!(k1.len(), MCP_KEY_PREFIX.len() + 64); // 256 bit hex
+		assert_ne!(k1, k2); // 每次都新随机
+
+		assert!(secret_eq(&k1, &k1.clone()));
+		assert!(!secret_eq(&k1, &k2));
+		assert!(!secret_eq(&k1, "")); // 长度不同
+		assert!(!secret_eq(&k1, &k1[..k1.len() - 1])); // 前缀相同但被截短
+		assert!(secret_eq("", ""));
 	}
 
 	#[test]

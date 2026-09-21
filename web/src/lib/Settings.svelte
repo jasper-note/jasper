@@ -40,6 +40,17 @@
     }
   })
 
+  // 描述符版本号：服务端生成了新值需要回显时（如 MCP 的 API key）+1，参与下面的 {#key}
+  // 强制重挂当前分区——SettingsSection 的表单值只在挂载时从描述符算一次，光换 prop 不会重算。
+  let schemaRev = $state(0)
+  async function reloadSchema() {
+    const fresh = await api.settingsSchema()
+    if (fresh) {
+      schema = fresh
+      schemaRev++
+    }
+  }
+
   const sections = $derived(schema?.sections ?? [])
   const setupSection = $derived(sections.find((s) => s.id === 'data-source'))
   const activeSection = $derived(sections.find((s) => s.id === activeId))
@@ -95,8 +106,13 @@
         {:else if schema === null}
           <div class="error"><Icon name="alert" size={14} /> {t('settings.connectFailed')}</div>
         {:else if activeSection}
-          {#key activeSection.id}
-            <SettingsSection section={activeSection} {onDone} {onAuthChanged} />
+          {#key `${activeSection.id}:${schemaRev}`}
+            <SettingsSection
+              section={activeSection}
+              {onDone}
+              {onAuthChanged}
+              onReloadSection={reloadSchema}
+            />
           {/key}
         {/if}
       </div>

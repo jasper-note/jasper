@@ -29,12 +29,15 @@
     section,
     onDone,
     onAuthChanged,
+    onReloadSection,
   }: {
     section: SettingsSection
     // 数据源 connect 成功（on_success=reload）：关闭设置并整库刷新
     onDone: () => void
     // 访问控制保存（on_success=relogin）：通知父组件刷新 /api/status
     onAuthChanged?: () => void
+    // on_success=reload-section：服务端生成了新值（如 MCP API key）→ 重拉描述符并重挂本分区
+    onReloadSection?: () => void | Promise<void>
   } = $props()
 
   const providerKeyOf = (p: StorageProvider) => `plugin:${p.pluginId}:${p.contribution.id}`
@@ -218,6 +221,10 @@
       }
       case 'saved':
         flashSaved()
+        break
+      case 'reload-section':
+        // 重挂后本组件即销毁，不必 flashSaved——新生成的 key 直接出现在界面上就是反馈
+        await onReloadSection?.()
         break
       default:
         break

@@ -291,9 +291,14 @@ const zh = {
 	'settings.mcp.enabled': '启用 MCP server',
 	'settings.mcp.enabledDesc': '关闭后 MCP 端点立即返回 503，已连接的客户端下次调用即失效。',
 	'settings.mcp.endpoint': '端点地址',
+	'settings.mcp.apiKey': 'API Key',
+	'settings.mcp.apiKeyDesc':
+		'MCP 专用的长效密钥，与浏览器登录状态无关：服务重启、浏览器登出都不会失效。一旦设置，MCP 端点只认它。',
+	'settings.mcp.generate': '生成 API Key',
+	'settings.mcp.regenerate': '重新生成',
+	'settings.mcp.clearKey': '清除 Key',
 	'settings.mcp.command': '添加到 Claude Code',
-	'settings.mcp.commandDesc':
-		'在终端里执行这条命令即可接上。设了访问密码时命令里已带上当前会话 token。',
+	'settings.mcp.commandDesc': '在终端里执行这条命令即可接上。',
 	'settings.mcp.tools': '已暴露的工具',
 	'settings.mcp.save': '保存 MCP 设置',
 	'settings.ai.loadFailed': '读取 AI 配置失败',
@@ -612,9 +617,14 @@ const en: typeof zh = {
 	'settings.mcp.enabledDesc':
 		'Turning this off makes the endpoint return 503 immediately; connected clients fail on their next call.',
 	'settings.mcp.endpoint': 'Endpoint',
+	'settings.mcp.apiKey': 'API key',
+	'settings.mcp.apiKeyDesc':
+		'A long-lived key just for MCP, independent of your browser session: it survives restarts and logging out. Once set, the MCP endpoint accepts nothing else.',
+	'settings.mcp.generate': 'Generate API key',
+	'settings.mcp.regenerate': 'Regenerate',
+	'settings.mcp.clearKey': 'Clear key',
 	'settings.mcp.command': 'Add to Claude Code',
-	'settings.mcp.commandDesc':
-		'Run this in a terminal to connect. When an access password is set, the command already carries your current session token.',
+	'settings.mcp.commandDesc': 'Run this in a terminal to connect.',
 	'settings.mcp.tools': 'Exposed tools',
 	'settings.mcp.save': 'Save MCP settings',
 

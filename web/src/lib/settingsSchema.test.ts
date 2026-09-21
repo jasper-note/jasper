@@ -32,6 +32,14 @@ describe('evalShowIf', () => {
 		expect(evalShowIf({ field: 'p', truthy: true }, { p: '' })).toBe(false)
 		expect(evalShowIf({ field: 'p', truthy: true }, { p: false })).toBe(false)
 	})
+	// truthy:false = 「没值时才显示」，用于 MCP 段的「生成 API key」按钮（已生成则换成「重新生成」）
+	it('truthy:false shows only when the value is absent', () => {
+		expect(evalShowIf({ field: 'k', truthy: false }, { k: false })).toBe(true)
+		expect(evalShowIf({ field: 'k', truthy: false }, { k: '' })).toBe(true)
+		expect(evalShowIf({ field: 'k', truthy: false }, {})).toBe(true)
+		expect(evalShowIf({ field: 'k', truthy: false }, { k: true })).toBe(false)
+		expect(evalShowIf({ field: 'k', truthy: false }, { k: 'jasper_mcp_x' })).toBe(false)
+	})
 })
 
 // 用非 i18n 键的字面标题：resolveLabel 对未知键回退原串，故搜索行为与语言无关。

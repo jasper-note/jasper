@@ -158,8 +158,8 @@ async fn guard_read_only(State(state): State<Arc<AppState>>, req: Request, next:
     next.run(req).await
 }
 
-/// 从 `Authorization: Bearer <token>` 头取会话 token。
-fn bearer_token(headers: &HeaderMap) -> Option<String> {
+/// 从 `Authorization: Bearer <token>` 头取会话 token（MCP 用同一个头传它的 API key）。
+pub(crate) fn bearer_token(headers: &HeaderMap) -> Option<String> {
     let v = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let t = v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer "))?.trim();
     (!t.is_empty()).then(|| t.to_string())
@@ -863,8 +863,19 @@ async fn settings_schema(State(state): State<Arc<AppState>>) -> Json<serde_json:
     // 局域网 IP? 反代域名?），也不该知道浏览器里的会话 token，故留 {origin} / {header}
     // 两个占位符由前端按运行时实际情况填（见 settingsSchema.ts::fillPlaceholders）。
     if crate::mcp::ENABLED {
-        let enabled = state.config.lock().unwrap().mcp_enabled();
+        let (enabled, api_key) = {
+            let store = state.config.lock().unwrap();
+            (store.mcp_enabled(), store.mcp_api_key())
+        };
         let shown_if_on = json!({ "field": "enabled", "truthy": true });
+        // 命令里的认证头：配了 MCP key 就由服务端直接拼死（key 本来就存在服务端，
+        // 这个描述符又是机密读），没配才留 {header} 占位符让前端填浏览器会话 token
+        // ——服务端不知道也不该知道后者。
+        let header_part = if api_key.is_empty() {
+            "{header}".to_string()
+        } else {
+            format!(" --header \"Authorization: Bearer {api_key}\"")
+        };
         sections.push(json!({
             "id": "mcp",
             "title_key": "settings.section.mcp",
@@ -877,6 +888,10 @@ async fn settings_schema(State(state): State<Arc<AppState>>) -> Json<serde_json:
                   "desc_key": "settings.mcp.enabledDesc" },
                 { "key": "endpoint", "type": "copy", "label_key": "settings.mcp.endpoint",
                   "show_if": shown_if_on },
+                // key 本身：设了才显示（`api_key_set` 是 values 里的只读标记）
+                { "key": "api_key", "type": "copy", "label_key": "settings.mcp.apiKey",
+                  "desc_key": "settings.mcp.apiKeyDesc",
+                  "show_if": { "field": "api_key_set", "truthy": true } },
                 { "key": "command", "type": "copy", "label_key": "settings.mcp.command",
                   "desc_key": "settings.mcp.commandDesc", "show_if": shown_if_on },
                 { "key": "tools", "type": "note", "label_key": "settings.mcp.tools",
@@ -885,13 +900,32 @@ async fn settings_schema(State(state): State<Arc<AppState>>) -> Json<serde_json:
             "values": {
                 "enabled": enabled,
                 "endpoint": format!("{{origin}}{MCP_PATH}"),
-                "command": format!("claude mcp add --transport http jasper {{origin}}{MCP_PATH}{{header}}"),
+                "api_key": api_key,
+                "api_key_set": !api_key.is_empty(),
+                "command": format!("claude mcp add --transport http jasper {{origin}}{MCP_PATH}{header_part}"),
                 "tools": crate::mcp::TOOL_NAMES.join("、")
             },
             "actions": [
                 { "id": "save", "label_key": "settings.mcp.save", "variant": "primary",
                   "request": { "method": "PUT", "url": "/api/mcp/config", "convention": "status" },
-                  "on_success": "saved" }
+                  "on_success": "saved" },
+                // 生成/轮换：只发动作，不带字段值（免得顺手把开关也改了）。
+                // 未设 key 时叫「生成」、已设时叫「重新生成」——同一个请求，两种措辞。
+                { "id": "generate", "label_key": "settings.mcp.generate",
+                  "request": { "method": "PUT", "url": "/api/mcp/config", "convention": "status",
+                               "extra": { "regenerate_key": true } },
+                  "submit": false, "on_success": "reload-section",
+                  "show_if": { "field": "api_key_set", "truthy": false } },
+                { "id": "regenerate", "label_key": "settings.mcp.regenerate",
+                  "request": { "method": "PUT", "url": "/api/mcp/config", "convention": "status",
+                               "extra": { "regenerate_key": true } },
+                  "submit": false, "on_success": "reload-section",
+                  "show_if": { "field": "api_key_set", "truthy": true } },
+                { "id": "clear_key", "label_key": "settings.mcp.clearKey", "variant": "danger",
+                  "request": { "method": "PUT", "url": "/api/mcp/config", "convention": "status",
+                               "extra": { "clear_key": true } },
+                  "submit": false, "on_success": "reload-section",
+                  "show_if": { "field": "api_key_set", "truthy": true } }
             ]
         }));
     }
@@ -903,13 +937,22 @@ async fn settings_schema(State(state): State<Arc<AppState>>) -> Json<serde_json:
 
 #[derive(Deserialize)]
 struct McpConfigReq {
-    enabled: bool,
+    /// 缺省 = 不改（「生成新密钥」「清除密钥」这类只发动作的请求不带它）。
+    #[serde(default)]
+    enabled: Option<bool>,
+    /// 生成一枚新的 API key（旧的立即失效）。
+    #[serde(default)]
+    regenerate_key: bool,
+    /// 清除 API key —— MCP 端点回落到会话 token / 无密码的既有行为。
+    #[serde(default)]
+    clear_key: bool,
 }
 
-/// PUT /api/mcp/config —— MCP server 运行时开关。只有 `enabled` 一个可变项：
+/// PUT /api/mcp/config —— MCP 运行时开关 + 独立 API key 的生成/清除。
 /// 端点地址由服务绑定地址决定、工具集由构建决定，都不是配置。
 /// 注意本路由**不**豁免只读/鉴权守卫（它是普通的 `/api/*` 写端点，不是 MCP 端点本身）——
-/// 只读态下不可改、匿名不可改，与其它设置一致。
+/// 只读态下不可改、匿名不可改，与其它设置一致。这也是 key 丢了之后的找回途径：
+/// 用浏览器身份重新生成即可，不会把自己锁在外面。
 async fn put_mcp_config(
     State(state): State<Arc<AppState>>,
     Json(req): Json<McpConfigReq>,
@@ -917,13 +960,34 @@ async fn put_mcp_config(
     if !crate::mcp::ENABLED {
         return StatusCode::NOT_FOUND; // 本构建没有 MCP，没有可配置的东西
     }
-    match state.config.lock().unwrap().set_mcp_enabled(req.enabled) {
+    if req.regenerate_key && req.clear_key {
+        return StatusCode::BAD_REQUEST; // 自相矛盾，不猜用户意图
+    }
+    let store = state.config.lock().unwrap();
+    let mut work = || -> anyhow::Result<()> {
+        if let Some(enabled) = req.enabled {
+            store.set_mcp_enabled(enabled)?;
+        }
+        if req.regenerate_key {
+            store.set_mcp_api_key(&crate::auth::gen_mcp_key())?;
+        } else if req.clear_key {
+            store.set_mcp_api_key("")?;
+        }
+        Ok(())
+    };
+    match work() {
         Ok(()) => {
-            tracing::info!(enabled = req.enabled, "mcp server toggled");
+            // 只记发生了什么，绝不记 key 本身
+            tracing::info!(
+                enabled = ?req.enabled,
+                regenerated = req.regenerate_key,
+                cleared = req.clear_key,
+                "mcp config updated",
+            );
             StatusCode::NO_CONTENT
         }
         Err(e) => {
-            tracing::warn!("failed to persist mcp switch: {e}");
+            tracing::warn!("failed to persist mcp config: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
@@ -2123,11 +2187,12 @@ mod tests {
         let mcp = body["sections"].as_array().unwrap().iter().find(|s| s["id"] == "mcp").unwrap().clone();
 
         assert_eq!(mcp["values"]["enabled"], true); // 未设置过 → 默认开
+        assert_eq!(mcp["values"]["api_key_set"], false); // 未生成过 key
         let endpoint = mcp["values"]["endpoint"].as_str().unwrap();
         let command = mcp["values"]["command"].as_str().unwrap();
         assert_eq!(endpoint, "{origin}/mcp");
         assert!(command.contains("{origin}/mcp") && command.contains("{header}"), "命令应留占位符: {command}");
-        assert!(!command.contains("Bearer "), "服务端不该把 token 拼进命令");
+        assert!(!command.contains("Bearer "), "没配 key 时服务端不该把 token 拼进命令");
         let tools = mcp["values"]["tools"].as_str().unwrap();
         assert!(tools.contains("search_notes") && tools.contains("delete_folder"), "工具清单: {tools}");
         assert_eq!(mcp["actions"][0]["request"]["url"], "/api/mcp/config");
@@ -2140,6 +2205,100 @@ mod tests {
         let body = body_json(send(state, "GET", "/api/settings/schema", "", None).await).await;
         let mcp = body["sections"].as_array().unwrap().iter().find(|s| s["id"] == "mcp").unwrap().clone();
         assert_eq!(mcp["values"]["enabled"], false);
+    }
+
+    /// MCP 独立 API key：生成 → 描述符回显并把完整命令拼好 → 端点只认这把 key
+    /// （不带 / 带错 / 拿有效会话 token 都是 401）→ 清除后回落既有行为。
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn mcp_api_key_locks_the_endpoint_independently_of_sessions() {
+        let state = state_with_auth(auth_config(Some("pw"), true, "none", &[]));
+        let ping = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        let session = state.auth.issue_token(); // 一枚有效的浏览器会话 token
+
+        // 没配 key：会话 token 可用（既有行为）
+        assert_ne!(
+            send(state.clone(), "POST", "/mcp", ping, Some(&session)).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        // 生成 key（只发动作，不带 enabled → 开关不受影响）
+        assert_eq!(
+            send(state.clone(), "PUT", "/api/mcp/config", r#"{"regenerate_key":true}"#, Some(&session)).await.status(),
+            StatusCode::NO_CONTENT
+        );
+        let key = state.config.lock().unwrap().mcp_api_key();
+        assert!(key.starts_with(crate::auth::MCP_KEY_PREFIX) && key.len() > 40, "key 形如 jasper_mcp_<64hex>: {key}");
+
+        // 描述符回显 key，并把完整命令拼好（key 本就在服务端，这个端点又是机密读）
+        let body = body_json(send(state.clone(), "GET", "/api/settings/schema", "", Some(&session)).await).await;
+        let mcp = body["sections"].as_array().unwrap().iter().find(|s| s["id"] == "mcp").unwrap().clone();
+        assert_eq!(mcp["values"]["api_key_set"], true);
+        assert_eq!(mcp["values"]["api_key"], key);
+        let command = mcp["values"]["command"].as_str().unwrap();
+        assert!(command.contains(&format!("Bearer {key}")), "命令应带上 key: {command}");
+        assert!(!command.contains("{header}"), "配了 key 就不该再留占位符");
+
+        // 端点只认这把 key
+        assert_eq!(send(state.clone(), "POST", "/mcp", ping, None).await.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            send(state.clone(), "POST", "/mcp", ping, Some("jasper_mcp_wrong")).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        // 关键：有效的会话 token 也进不去——key 是给 MCP 单独上的锁
+        assert_eq!(
+            send(state.clone(), "POST", "/mcp", ping, Some(&session)).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_ne!(
+            send(state.clone(), "POST", "/mcp", ping, Some(&key)).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        // key 不随会话失效：吊销全部会话（等价于服务重启/改密码）后照常可用
+        state.auth.revoke_all();
+        assert_ne!(
+            send(state.clone(), "POST", "/mcp", ping, Some(&key)).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        // 重新生成 → 旧 key 立即失效
+        let session2 = state.auth.issue_token();
+        send(state.clone(), "PUT", "/api/mcp/config", r#"{"regenerate_key":true}"#, Some(&session2)).await;
+        let key2 = state.config.lock().unwrap().mcp_api_key();
+        assert_ne!(key, key2);
+        assert_eq!(send(state.clone(), "POST", "/mcp", ping, Some(&key)).await.status(), StatusCode::UNAUTHORIZED);
+
+        // 清除 → 回落既有行为（会话 token 又能用了）
+        send(state.clone(), "PUT", "/api/mcp/config", r#"{"clear_key":true}"#, Some(&session2)).await;
+        assert!(state.config.lock().unwrap().mcp_api_key().is_empty());
+        assert_ne!(
+            send(state.clone(), "POST", "/mcp", ping, Some(&session2)).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        // 自相矛盾的请求不猜意图
+        assert_eq!(
+            send(state.clone(), "PUT", "/api/mcp/config", r#"{"regenerate_key":true,"clear_key":true}"#, Some(&session2)).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    /// 管理端点本身不豁免守卫——否则谁都能把 key 换掉。
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn mcp_config_endpoint_is_guarded_like_any_other_setting() {
+        // 设了密码的匿名请求 → 401
+        let state = state_with_auth(auth_config(Some("pw"), true, "none", &[]));
+        assert_eq!(
+            send(state, "PUT", "/api/mcp/config", r#"{"regenerate_key":true}"#, None).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        // 只读模式 → 403
+        assert_eq!(
+            status_of(state_with_read_only(true), "PUT", "/api/mcp/config", r#"{"enabled":false}"#).await,
+            StatusCode::FORBIDDEN
+        );
     }
 
     /// MCP 端点从两道「按 HTTP 方法」的守卫里豁免（否则只读态连 tools/list 都 403、

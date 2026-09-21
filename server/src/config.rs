@@ -272,6 +272,17 @@ impl ConfigStore {
         self.set_setting("mcp_enabled", if enabled { "1" } else { "0" })
     }
 
+    /// MCP API key（未设置 = 空串）。**明文存**，与 `webdav_pass` / AI `api_key` 同一口径：
+    /// 它得能在设置页回显给用户复制进 MCP 客户端配置，哈希存就再也拿不回来了。
+    /// 读它的 `/api/settings/schema` 已被 guard_auth 列为机密读（匿名 401）。
+    pub fn mcp_api_key(&self) -> String {
+        self.setting("mcp_api_key").unwrap_or_default()
+    }
+
+    pub fn set_mcp_api_key(&self, key: &str) -> Result<()> {
+        self.set_setting("mcp_api_key", key)
+    }
+
     /// 读宿主级 AI 配置；未配置的键为空串（provider 为空 = 未配置）。
     pub fn ai_config(&self) -> AiConfig {
         AiConfig {

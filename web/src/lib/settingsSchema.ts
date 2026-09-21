@@ -65,7 +65,9 @@ export interface SettingsAction {
 	label_key: string
 	variant?: 'primary' | 'danger' | 'default'
 	request: SettingsRequest
-	on_success?: 'reload' | 'relogin' | 'saved' | 'none'
+	// reload=关设置并整库刷新；relogin=用刚设的密码重登；saved=闪一下「已保存」；
+	// reload-section=重新拉描述符并只刷新本分区（服务端生成了新值要回显，如 MCP 的 API key）
+	on_success?: 'reload' | 'relogin' | 'saved' | 'reload-section' | 'none'
 	show_if?: ShowIf
 	submit?: boolean // false = 只发 request.extra，不带字段值（如清除密码）
 }
@@ -116,7 +118,8 @@ export function evalShowIf(cond: ShowIf | undefined, values: Record<string, unkn
 	if (cond.equals !== undefined) return v === cond.equals
 	if (cond.in) return typeof v === 'string' && cond.in.includes(v)
 	if (cond.not_in) return !(typeof v === 'string' && cond.not_in.includes(v))
-	if (cond.truthy) return Boolean(v)
+	// truthy:true 要求有值、truthy:false 要求没值（后者用于「未设置时才显示」，如 MCP 的「生成 key」按钮）
+	if (cond.truthy !== undefined) return cond.truthy ? Boolean(v) : !v
 	return true
 }
 
