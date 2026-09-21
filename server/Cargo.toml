@@ -42,6 +42,11 @@ toml = { version = "1", optional = true }
 # host:ai：多提供方 LLM 客户端（anthropic / openai 兼容 + 自定义 base_url；reqwest+rustls 栈，
 # 仅 plugins 构建承担，spec 0.3 §6.5）
 genai = { version = "0.6", optional = true }
+# MCP server（仅 `--features mcp` 时编译；默认构建零新增依赖）：官方 Rust SDK。
+# 默认 features 已含 macros + server，这里只补 Streamable HTTP 传输（自带 session manager）。
+# schemars 供工具入参 derive JSON Schema——MCP 客户端据此知道每个工具怎么调。
+rmcp = { version = "3", features = ["transport-streamable-http-server"], optional = true }
+schemars = { version = "1", optional = true }
 
 [dev-dependencies]
 # 仅测试用：oneshot 把请求灌进 Router 断言只读守卫行为。
@@ -54,6 +59,9 @@ tempfile = "3"
 embed = ["dep:rust-embed"]
 # 插件系统（spec 0.3）：wasmi 沙箱宿主 + zip 安装 + manifest 解析 + host:ai（genai）。
 plugins = ["dep:wasmi", "dep:zip", "dep:toml", "dep:genai", "jasper-core/serde"]
+# MCP server：把笔记库以 Model Context Protocol 暴露给 Claude Code 等客户端
+# （Streamable HTTP，挂在现有 axum router 的 /mcp 下，复用同一份 handler 与鉴权）。
+mcp = ["dep:rmcp", "dep:schemars"]
 
 [profile.release]
 opt-level = "z"

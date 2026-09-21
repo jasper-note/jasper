@@ -24,6 +24,7 @@ mod cache;
 mod config;
 mod events;
 mod indexer;
+mod mcp;
 mod plugins;
 mod storage;
 #[cfg(feature = "embed")]

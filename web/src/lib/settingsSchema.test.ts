@@ -4,8 +4,11 @@ import {
 	filterSections,
 	buildRequestBody,
 	interpretResult,
+	fillPlaceholders,
+	isDisplayField,
 	type SettingsSection,
 	type SettingsAction,
+	type SettingsField,
 } from './settingsSchema'
 
 describe('evalShowIf', () => {
@@ -124,6 +127,47 @@ describe('buildRequestBody', () => {
 		expect(buildRequestBody('access-control', clear, { password: 'x', list_mode: 'none' })).toEqual({
 			clear_password: true,
 		})
+	})
+})
+
+// 展示型字段（MCP 段的端点地址 / claude mcp add 命令 / 工具清单）：服务端只下发模板，
+// 运行时信息（访问地址、会话 token）由前端补；且这些字段不该回传给服务端。
+describe('display fields (copy/note)', () => {
+	it('classifies copy/note as display-only', () => {
+		expect(isDisplayField('copy')).toBe(true)
+		expect(isDisplayField('note')).toBe(true)
+		expect(isDisplayField('text')).toBe(false)
+		expect(isDisplayField('bool')).toBe(false)
+	})
+
+	it('fills {origin} and {header} with runtime values', () => {
+		expect(fillPlaceholders('{origin}/mcp', 'http://127.0.0.1:27583', null)).toBe(
+			'http://127.0.0.1:27583/mcp',
+		)
+		expect(
+			fillPlaceholders('claude mcp add --transport http jasper {origin}/mcp{header}', 'https://n.example', 'tok123'),
+		).toBe('claude mcp add --transport http jasper https://n.example/mcp --header "Authorization: Bearer tok123"')
+	})
+
+	it('drops the auth header entirely when there is no token', () => {
+		// 未设访问密码时命令里不该出现空的 Authorization 头
+		const out = fillPlaceholders('cmd {origin}/mcp{header}', 'http://h', null)
+		expect(out).toBe('cmd http://h/mcp')
+		expect(out).not.toContain('Authorization')
+	})
+
+	it('replaces every occurrence of a placeholder', () => {
+		expect(fillPlaceholders('{origin} and {origin}', 'X', null)).toBe('X and X')
+	})
+
+	it('excludes display fields from the request body', () => {
+		const fields: SettingsField[] = [
+			{ key: 'enabled', type: 'bool' },
+			{ key: 'endpoint', type: 'copy' },
+			{ key: 'tools', type: 'note' },
+		]
+		const values = { enabled: true, endpoint: '{origin}/mcp', tools: 'search_notes、get_note' }
+		expect(buildRequestBody('mcp', save, values, fields)).toEqual({ enabled: true })
 	})
 })
 

@@ -18,13 +18,13 @@ WORKDIR /build/server
 # 先用清单 + 占位 main 构建依赖层（rusqlite/axum/rust-embed 等编译较久，缓存复用）
 COPY server/Cargo.toml server/Cargo.lock ./
 RUN mkdir src && echo 'fn main() {}' > src/main.rs \
- && cargo build --release --features embed,plugins \
+ && cargo build --release --features embed,plugins,mcp \
  && rm -rf src
 # 内嵌前端：前端产物放到 ../web/dist（相对 server crate），供 rust-embed 编译期收录
 COPY --from=webbuild /web/dist /build/web/dist
 # 再构建真正的二进制（--features embed：把 web/dist 编译进二进制）
 COPY server/src ./src
-RUN touch src/main.rs && cargo build --release --features embed,plugins
+RUN touch src/main.rs && cargo build --release --features embed,plugins,mcp
 
 # ---- 3) 运行镜像（仅一个自带前端的二进制）----
 FROM debian:bookworm-slim

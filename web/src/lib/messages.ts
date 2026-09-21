@@ -11,6 +11,7 @@ const zh = {
 	'common.cancel': '取消',
 	'common.rename': '重命名',
 	'common.delete': '删除',
+	'common.copy': '复制',
 	'common.loading': '加载中…',
 	'common.untitled': '(无标题)',
 	'common.unnamed': '(未命名)',
@@ -92,6 +93,7 @@ const zh = {
 	'settings.section.dataSource': '数据源',
 	'settings.section.accessControl': '访问控制',
 	'settings.section.ai': 'AI',
+	'settings.section.mcp': 'MCP',
 	'settings.section.appearance': '外观',
 	'settings.section.editor': '编辑器',
 	'settings.libMode': '笔记库',
@@ -282,6 +284,18 @@ const zh = {
 	'settings.ai.modelPh': '如 claude-opus-4-8 / gpt-4o-mini / qwen3',
 	'settings.ai.save': '保存 AI 配置',
 	'settings.ai.saved': '已保存',
+
+	// 设置页 MCP 段（把笔记库暴露给 Claude Code 等 MCP 客户端）
+	'settings.mcp.desc':
+		'把这个笔记库以 Model Context Protocol 暴露出去，让 Claude Code、Claude Desktop 等客户端能搜索、读写你的笔记。',
+	'settings.mcp.enabled': '启用 MCP server',
+	'settings.mcp.enabledDesc': '关闭后 MCP 端点立即返回 503，已连接的客户端下次调用即失效。',
+	'settings.mcp.endpoint': '端点地址',
+	'settings.mcp.command': '添加到 Claude Code',
+	'settings.mcp.commandDesc':
+		'在终端里执行这条命令即可接上。设了访问密码时命令里已带上当前会话 token。',
+	'settings.mcp.tools': '已暴露的工具',
+	'settings.mcp.save': '保存 MCP 设置',
 	'settings.ai.loadFailed': '读取 AI 配置失败',
 
 	// 访问控制（鉴权）
@@ -323,6 +337,7 @@ const en: typeof zh = {
 	'common.cancel': 'Cancel',
 	'common.rename': 'Rename',
 	'common.delete': 'Delete',
+	'common.copy': 'Copy',
 	'common.loading': 'Loading…',
 	'common.untitled': '(Untitled)',
 	'common.unnamed': '(Unnamed)',
@@ -405,6 +420,7 @@ const en: typeof zh = {
 	'settings.section.dataSource': 'Data source',
 	'settings.section.accessControl': 'Access control',
 	'settings.section.ai': 'AI',
+	'settings.section.mcp': 'MCP',
 	'settings.section.appearance': 'Appearance',
 	'settings.section.editor': 'Editor',
 	'settings.libMode': 'Library',
@@ -588,6 +604,19 @@ const en: typeof zh = {
 	'settings.ai.save': 'Save AI config',
 	'settings.ai.saved': 'Saved',
 	'settings.ai.loadFailed': 'Failed to load AI config',
+
+	// Settings MCP section (exposes the library to Claude Code and other MCP clients)
+	'settings.mcp.desc':
+		'Expose this library over the Model Context Protocol so clients like Claude Code and Claude Desktop can search, read and write your notes.',
+	'settings.mcp.enabled': 'Enable MCP server',
+	'settings.mcp.enabledDesc':
+		'Turning this off makes the endpoint return 503 immediately; connected clients fail on their next call.',
+	'settings.mcp.endpoint': 'Endpoint',
+	'settings.mcp.command': 'Add to Claude Code',
+	'settings.mcp.commandDesc':
+		'Run this in a terminal to connect. When an access password is set, the command already carries your current session token.',
+	'settings.mcp.tools': 'Exposed tools',
+	'settings.mcp.save': 'Save MCP settings',
 
 	// Access control (auth)
 	'settings.auth.title': 'Access control',

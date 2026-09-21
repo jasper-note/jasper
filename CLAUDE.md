@@ -38,6 +38,8 @@ server/        Rust 后端 (axum)，依赖 jasper-core
       storage.rs     PluginStorage（storage.* dispatch → StorageBackend 适配）+ 配置校验
       hooks.rs       before-save 串联（插件失败不丢数据）
     api.rs         axum 路由与 handler，AppState
+    mcp.rs         MCP server（feature = "mcp"；含 feature-off 零成本桩）：rmcp 的 Streamable HTTP
+                   挂在 /mcp，13 个工具全是对 api.rs handler 的薄包装；门控在工具层（见 docs/mcp-server.md）
 plugin-sdk/    插件作者 SDK (jasper-plugin-sdk)：ABI 胶水(rt.rs)/宿主封装(host.rs)/
                Storage trait(storage.rs)/register! 宏；共享 jasper-core(serde) 类型
 plugins-examples/  宿主测试夹具/参考实现（cdylib → wasm32-unknown-unknown；build-wasm.sh 一键构建；path 依赖仓内 SDK，随宿主共演进；**不对外分发**——用户装的插件见「插件生态仓库」）
@@ -69,6 +71,7 @@ web/           Svelte 5 (runes) + Vite + TS 前端
     shims.d.ts         无类型 markdown-it 插件的最小声明
 docs/joplin-data-format.md   逆向出的 Joplin 数据格式规范（解析层依据）
 docs/plugin-spec.md          插件规范 v0.3（契约）；docs/plugin-design.md 架构决策
+docs/mcp-server.md           MCP server（工具清单 / 门控为何在工具层 / 为何复用 handler）
 Dockerfile / docker-compose.yml / .dockerignore
 ```
 
@@ -89,6 +92,10 @@ cd web && pnpm build                   # 产出 web/dist，由后端在 27583 �
 # 单文件打包（前端内嵌进二进制，运行时不依赖磁盘上的 web/dist）
 cd web && pnpm build                            # 必须先有 web/dist
 cd server && cargo build --release --features embed   # 产物 server/target/release/jasper
+
+# MCP server（把笔记库暴露给 Claude Code 等客户端；默认构建不含，见 docs/mcp-server.md）
+cd server && cargo build --features mcp
+claude mcp add --transport http jasper http://127.0.0.1:27583/mcp   # 设了访问密码再加 Bearer 头
 
 # 本地起一个 WebDAV 服务端联调（hacdias/webdav，端口 8081，账号 joplin/joplin）
 docker compose -f docker-compose.dev.yml up -d
@@ -232,6 +239,13 @@ POST   /api/plugins/{id}/editor/transform  编辑期文本变换（0.4 阶段 4�
                                         纯文本 in/out（无 notes/ai 上下文、无 pending_writes）；只读被写守卫拦截
 PUT    /api/plugins/{id}/auto-approve  notes:write「写入免确认」开关（0.3，宿主托管）{ enabled } → PluginInfo
 GET/PUT /api/ai/config                 宿主级 AI 配置（0.3）{ provider, base_url, api_key, model }；api_key 回显
+
+（以下仅 --features mcp 构建存在）
+/mcp                                   MCP server 端点（Streamable HTTP，rmcp）。JSON-RPC 全压这一个路径且
+                                        一律 POST → **两道守卫都放行它**（否则只读时连 tools/list 都 403、
+                                        匿名连工具都列不出），门控下沉到各工具：读工具按 Scope 过滤、
+                                        写工具查只读 + 要求 Access::Full。详见 docs/mcp-server.md
+PUT    /api/mcp/config                 MCP 运行时开关 { enabled }（普通 /api/* 写端点，**不**豁免守卫）
 ```
 
 > **只读模式**：`read_only` 开启时，`api::guard_read_only` 中间件按 HTTP 方法拦截，凡写方法（POST/PUT/DELETE/PATCH）一律返回 `403 {"error":"read_only"}`，**`PUT /api/config` 与 `/api/auth/*` 豁免**（用于在设置页把只读关回去 / 登录改密码）。`/api/status` 与 `/api/config` 返回 `read_only` 供前端遮蔽写入入口。
@@ -283,7 +297,8 @@ GET/PUT /api/ai/config                 宿主级 AI 配置（0.3）{ provider, b
 ## 测试
 
 三层，均在 CI（`.github/workflows/ci.yml`：`rust-test` / `web-unit` / `e2e`）跑：
-- **Rust 单元**：`cd core && cargo test`（parser/serialize/library；`--features serde` 再跑一遍含 serde 往返）+ `cd plugin-sdk && cargo test`（ABI 信封/存储路由/register! ui 槽，native；`--features native-host` 再跑一遍含宿主替身：settings/http/notes 内存库/ai 预置回复）+ `cd server && cargo test`（config/storage/cache/webdav）**及** `cargo test --features plugins`（manifest/zip 安装/能力门控/限额/before-save/命令链路/存储适配/**notes.* 提案与直写含跳钩子证明/ai.complete 双协议 stub/ui 端点与 pending_writes 全链路/editor.transform 编辑期钩子全链路含相位/守卫/只读分支**）。测试写在各 `.rs` 的 `#[cfg(test)] mod tests`。三类自动跳过（CI 安全）：`parser::parses_all_real_data` 缺 `JopinData/`；wasm 夹具测试缺 `plugins-examples/*/plugin.wasm`（先跑 `plugins-examples/build-wasm.sh`）；webdav 存储插件集成测试未设 `JASPER_TEST_WEBDAV_URL=http://127.0.0.1:8081/`（`docker compose -f docker-compose.dev.yml up -d` 起 hacdias/webdav）。s3/ai-polish 的插件行为测试在 jasper-plugins 仓库（MinIO 也在那边的 CI/compose 里）。
+- **Rust 单元**：`cd core && cargo test`（parser/serialize/library；`--features serde` 再跑一遍含 serde 往返）+ `cd plugin-sdk && cargo test`（ABI 信封/存储路由/register! ui 槽，native；`--features native-host` 再跑一遍含宿主替身：settings/http/notes 内存库/ai 预置回复）+ `cd server && cargo test`（config/storage/cache/webdav）**及** `cargo test --features mcp`（MCP 描述符下发模板不含 token / 端点豁免两道按方法的守卫 / 开关关掉后 503）
+**及** `cargo test --features plugins`（manifest/zip 安装/能力门控/限额/before-save/命令链路/存储适配/**notes.* 提案与直写含跳钩子证明/ai.complete 双协议 stub/ui 端点与 pending_writes 全链路/editor.transform 编辑期钩子全链路含相位/守卫/只读分支**）。测试写在各 `.rs` 的 `#[cfg(test)] mod tests`。三类自动跳过（CI 安全）：`parser::parses_all_real_data` 缺 `JopinData/`；wasm 夹具测试缺 `plugins-examples/*/plugin.wasm`（先跑 `plugins-examples/build-wasm.sh`）；webdav 存储插件集成测试未设 `JASPER_TEST_WEBDAV_URL=http://127.0.0.1:8081/`（`docker compose -f docker-compose.dev.yml up -d` 起 hacdias/webdav）。s3/ai-polish 的插件行为测试在 jasper-plugins 仓库（MinIO 也在那边的 CI/compose 里）。
 - **前端单元**（`cd web && pnpm test`，Vitest + jsdom）：`src/**/*.test.ts` 与源码同目录。覆盖 `api`(parseResourceId/taskProgress)、`render`(markdown/`:/id`改写/HTML 净化/renderMarkdown)、`i18n`(t 插值/切换/zh-en 键与占位符对齐/**插件语言注册+回落链+可选语言列表+来源消失收敛+resolveText 多语言 UI 字段解析**)、`milkdown/imageBlockAlt`(图片 alt 往返)、`schema`/`SchemaForm`(字段词汇校验+渲染)、`plugins`(探测含 SPA-fallback 坑/provider 过滤/sidebar 过滤/主题 link 注入/**editorInputPlugins 过滤**)、`UiWidget`(十 widget 契约含 checkbox/select/divider/heading/未知 type 忽略/**locale map 文本字段按语言渲染+回落**)、`api`(**editorTransform 往返+错误**)、`ChatWidget`(发送往返/**多会话持久化+隔离+新建**)、`selection`(**笔记内容区选区捕获/聊天区不覆盖/清空**)、`chatSessions`(**会话模型增删改+localStorage 往返+损坏兜底**)、`pendingWrites`(确认队列)、`diff`(行级 LCS/超预算退化)、`TagList`(标签区渲染/空时不渲染/点击回调/选中态)、`NoteTags`(加载/打标签 trim/去标签/只读)。`pnpm check` 也会类型检查测试文件。
 - **全栈 e2e**（`cd web && pnpm e2e`，Playwright，真起 Rust 后端）：代码在 `web/e2e/`。`make-fixture.mjs` 生成最小 Joplin 库（字段对齐 `serialize.rs`）；`server.mjs` 是 `webServer` 启动器——每次重建临时数据源 + 隔离 `JASPER_CONFIG_DIR`（**否则会读到开发机指向 JopinData 的已存配置**），起 `server/target/debug/jasper` 且经 `JASPER_WEB_DIR` 托管 `web/dist`；`playwright.config.ts` 里把 `127.0.0.1` 加进 `NO_PROXY`（有代理环境时健康检查才连得上）、`webServer.env` 必须并入 `process.env`。specs 覆盖 加载/搜索/渲染/编辑写回、**笔记本级联删除**（`delete-notebook.spec.ts` 自建笔记本+笔记再删掉，不碰 fixture 的 'Notebook'）、**富文本图片 alt 回归**，以及**插件流**（`plugins.spec.ts` 装 `e2e/fixtures/*.jplug`：主题自动启用→ThemePicker→卸载回落 + consent 弹窗；`locale.spec.ts` 装 `locale.jplug`：语言包自动启用→LangPicker 出现法语→选中后搜索占位符切法语→卸载回落；后端须带 `--features plugins` 构建，否则该组自动跳过；`wizard-plugin-source.spec.ts` 用 page.route 伪造 provider 断言向导 payload，无需真插件；`market.spec.ts` 用 page.route 伪造 registry 索引与下载 URL（真夹具字节+真 sha256）覆盖 浏览→安装→已装 + 坏 sha 中止 + 不兼容置灰；`sidebar.spec.ts` 用 page.route 伪造插件列表/ui 树/命令响应，但**写提案批准路径走真 PUT /api/notes** 断言落盘——提案目标用 todoNote（edit.spec 会改 plainNote，避免顺序污染））。夹具由 `e2e/make-plugin-fixtures.py` 生成（zip 已入库）。前置：先 `pnpm build` + `cargo build --features plugins` + `pnpm e2e:install`（下载 Chromium）。**端口坑**：本地 `reuseExistingServer` 会复用已占 27599 的进程——若你自己的调试服务恰好挂在该端口，测试会跑在你的库上大片失败（症状：应用能开但找不到夹具笔记）；用 `JASPER_E2E_PORT=27601 pnpm e2e` 换端口，别杀自己的服务。
 
@@ -305,7 +320,7 @@ parser 单测对其做全量解析校验（计数断言）。**写入类测试�
 多阶段构建（node 构建前端 → rust 用 `--features embed` 把前端**内嵌**进二进制 → debian-slim 运行）。
 运行镜像里**只有一个自带前端的二进制**（不再单独 COPY dist、不再设 `JASPER_WEB_DIR`）。配置目录挂卷 `/config` 持久化。
 - 本地：`docker compose up --build`，访问 `http://localhost:27583/`。
-- 发布 GHCR：`.github/workflows/docker.yml` **只在推 `v*` tag（前缀匹配）或手动**时构建并推到 `ghcr.io/<owner>/<repo>`（不再每次提交 main 都发包，省资源）。**发版约定（日期式）**：先把 `server/Cargo.toml` version 改成 `YYYY.M.D`（`/api/status` 的 `version` 与市场 minHostVersion 过滤都用它）——**日期一律取 UTC+8（Asia/Shanghai）当天**，不看操作者本机时区或 CI runner 时区（GitHub-hosted runner 默认 UTC，零点前后会跟 UTC+8 差一天）：`TZ=Asia/Shanghai date +%Y.%-m.%-d`（Linux；macOS 无 `%-m/%-d` 用 `date -j -v+8H -u +%Y.%-m.%-d` 或直接 `TZ=Asia/Shanghai date +%Y.%-e.%-d | tr -d ' '`）+ `cargo update -w` 刷 lock，再 `git tag v2026.7.2-1 && git push origin v2026.7.2-1`（`-N` 为同日序号，同一 UTC+8 日期内第二次及以后发版递增）→ 打对应 tag + `latest`。镜像构建带 `--features embed,plugins`（2026.7.2 起；缺 plugins 则插件系统/市场全不可用）。用内置 `GITHUB_TOKEN`，无需额外 secret。
+- 发布 GHCR：`.github/workflows/docker.yml` **只在推 `v*` tag（前缀匹配）或手动**时构建并推到 `ghcr.io/<owner>/<repo>`（不再每次提交 main 都发包，省资源）。**发版约定（日期式）**：先把 `server/Cargo.toml` version 改成 `YYYY.M.D`（`/api/status` 的 `version` 与市场 minHostVersion 过滤都用它）——**日期一律取 UTC+8（Asia/Shanghai）当天**，不看操作者本机时区或 CI runner 时区（GitHub-hosted runner 默认 UTC，零点前后会跟 UTC+8 差一天）：`TZ=Asia/Shanghai date +%Y.%-m.%-d`（Linux；macOS 无 `%-m/%-d` 用 `date -j -v+8H -u +%Y.%-m.%-d` 或直接 `TZ=Asia/Shanghai date +%Y.%-e.%-d | tr -d ' '`）+ `cargo update -w` 刷 lock，再 `git tag v2026.7.2-1 && git push origin v2026.7.2-1`（`-N` 为同日序号，同一 UTC+8 日期内第二次及以后发版递增）→ 打对应 tag + `latest`。镜像构建带 `--features embed,plugins,mcp`（plugins 自 2026.7.2、mcp 自 2026.9.21；缺 plugins 则插件系统/市场全不可用，缺 mcp 则容器里没有 `/mcp` 端点与设置页 MCP 段）。用内置 `GITHUB_TOKEN`，无需额外 secret。
 - WASM demo（`pages.yml`）仍在推 main 时部署，但 `paths-ignore` 掉纯文档/截图提交（`**/*.md`、`docs/**`、`.github/**`），只有前端/core/wasm 改动才重建。
 - 拉取运行：`docker run -p 27583:27583 -v jasper-config:/config ghcr.io/<owner>/jasper:latest`。
 （注意：当前未做鉴权，容器 0.0.0.0 暴露时谨慎；网络受限地区拉取 Docker Hub 基础镜像可能需镜像加速。）
@@ -367,4 +382,16 @@ resource→note→folder 的权限链路接进既有黑白名单规则（同一�
 `POST /api/plugins/{id}/editor/transform` 端点，纯文本 in/out、无 notes/ai 上下文，任一插件失败即跳过）+ SDK `register!` 增 `editor` 槽 +
 前端**仅源码编辑器**接 `input` 相位（`Editor.svelte` CodeMirror debounce → 保守替换缓冲，仅真实用户输入触发、天然防环、陈旧丢弃；`api.editorTransform`/`plugins.editorInputPlugins`）+
 `UiWidget.svelte` widget 词汇从六扩到十（补 `checkbox`/`select`/`divider`/`heading`；`WIDGET_TYPES` 同步）。testbed 加 `editor.transform` 夹具；三层测试全绿。详见「插件系统」节与 spec §12.4。
+**MCP server**（2026-09-21 落地；详见 `docs/mcp-server.md`）：`--features mcp` 用官方 rmcp SDK 的 Streamable HTTP
+把笔记库暴露给 Claude Code 等客户端，`nest_service` 挂在现有 axum router 的 `/mcp`（不另起进程/端口）。
+13 个工具（搜索/读/列举 6 + 写 5 + 删 2，删除类带 destructiveHint）**全是对 api.rs 现有 handler 的薄包装**
+——axum 提取器都是可手工构造的 tuple struct，故可见范围过滤 / before-save 钩子 / 事件广播 / Joplin 字节格式
+都是同一份实现，两条路径不会漂移（代价：api.rs 若干 pub(crate)）。
+**门控在工具层不在中间件**：MCP 的 JSON-RPC 全压一个路径且一律 POST，按方法拦截的两道守卫对它失真
+（只读会让 MCP 整个不可用、匿名连工具都列不出），故 `is_mcp_path` 放行两道守卫，改由各工具
+`deny_read_only` + `require_full`（写）/ 传 `Access` 给 handler 按 `Scope` 过滤（读）。
+运行时开关存 config.db（默认开，设置页可关 → 端点 503）；设置页 MCP 段走既有 server-driven 描述符，
+为此给字段词汇加了 `copy`（只读+复制）/`note`（纯展示）两型，端点地址与 `claude mcp add` 命令由服务端下发
+模板 + 前端填 `{origin}`/`{header}`（服务端不知道访问地址、也不该知道浏览器里的 token）。Docker 镜像已带 mcp。
+
 待办：全局改标签名/删标签（写/删 tag 条目 + 级联 note_tag）、E2EE 解密（按需）；插件阶段 4 后续（`before-save` 相位前端接入 + `contributes.editor` 的可选 `command` 复用 + 富文本模式接入，见 docs/plugin-design.md §11）。

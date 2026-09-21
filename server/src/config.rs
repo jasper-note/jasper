@@ -262,6 +262,16 @@ impl ConfigStore {
         self.set_setting("ui_locale", locale)
     }
 
+    /// MCP server 是否启用。仅 `--features mcp` 构建有意义；**未设置时默认开启**——
+    /// 能编出 MCP 端点本身已是一次显式选择（要 `--features mcp`），这个开关是给临时关掉用的。
+    pub fn mcp_enabled(&self) -> bool {
+        !matches!(self.setting("mcp_enabled").as_deref(), Some("0"))
+    }
+
+    pub fn set_mcp_enabled(&self, enabled: bool) -> Result<()> {
+        self.set_setting("mcp_enabled", if enabled { "1" } else { "0" })
+    }
+
     /// 读宿主级 AI 配置；未配置的键为空串（provider 为空 = 未配置）。
     pub fn ai_config(&self) -> AiConfig {
         AiConfig {

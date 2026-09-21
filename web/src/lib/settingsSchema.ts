@@ -26,6 +26,10 @@ export type SettingsFieldType =
 	| 'theme'
 	| 'language'
 	| 'provider-config'
+	// 只读展示 + 一键复制（如 MCP 端点地址、`claude mcp add` 命令）。值不参与提交。
+	| 'copy'
+	// 纯展示文本（如 MCP 已暴露的工具清单）。值不参与提交。
+	| 'note'
 
 export interface SettingsFieldOption {
 	value: string
@@ -88,6 +92,23 @@ export function resolveLabel(key: string | undefined): string {
 	return t(key as MsgKey)
 }
 
+/** 展示型字段（copy/note）：只读，不参与动作提交的载荷。 */
+export function isDisplayField(type: SettingsFieldType): boolean {
+	return type === 'copy' || type === 'note'
+}
+
+/**
+ * 填充服务端下发的运行时占位符。服务端不知道客户端是从哪个地址访问它的，
+ * 也不该知道浏览器里的会话 token，所以它只下发模板，由这里补齐：
+ * - `{origin}` → 当前页面来源（如 `http://127.0.0.1:27583`）
+ * - `{header}` → 有会话 token 时的 `--header "Authorization: Bearer <token>"`，否则空串
+ *   （未设访问密码时本就不需要这个头，命令里也不该出现）
+ */
+export function fillPlaceholders(tpl: string, origin: string, token: string | null): string {
+	const header = token ? ` --header "Authorization: Bearer ${token}"` : ''
+	return tpl.replaceAll('{origin}', origin).replaceAll('{header}', header)
+}
+
 /** 条件显隐求值：show_if 未定义 → 恒显示。字段值取自当前表单值对象。 */
 export function evalShowIf(cond: ShowIf | undefined, values: Record<string, unknown>): boolean {
 	if (!cond) return true
@@ -117,16 +138,20 @@ export function filterSections(sections: SettingsSection[], query: string): Sett
 	return sections.filter((s) => sectionSearchText(s).includes(q))
 }
 
-/** 组装动作请求体。data-source 分区做载荷适配（拆插件 key、推导 create_new）；其余分区直接用字段值。 */
+/** 组装动作请求体。data-source 分区做载荷适配（拆插件 key、推导 create_new）；其余分区直接用字段值。
+ *  `fields` 用于剔除展示型字段（copy/note）——它们是给人看的，不该回传给服务端。 */
 export function buildRequestBody(
 	sectionId: string,
 	action: SettingsAction,
 	values: Record<string, unknown>,
+	fields: SettingsField[] = [],
 ): Record<string, unknown> {
 	const extra = action.request.extra ?? {}
 	if (action.submit === false) return { ...extra }
 	if (sectionId === 'data-source') return { ...dataSourcePayload(values), ...extra }
-	return { ...values, ...extra }
+	const payload = { ...values }
+	for (const f of fields) if (isDisplayField(f.type)) delete payload[f.key]
+	return { ...payload, ...extra }
 }
 
 // 数据源字段值 → PUT /api/config 载荷。source_type 为 'local'|'webdav'|'plugin:<id>:<contrib>'。

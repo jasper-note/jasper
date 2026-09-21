@@ -10,6 +10,8 @@
 //!   PUT    /api/folders/{id}     重命名笔记本 { title }
 //!   PUT    /api/folders/{id}/move 移动笔记本（改 parent_id；防环）
 //!   DELETE /api/folders/{id}     删除笔记本（级联：子笔记本 + 其中全部笔记）
+//!   PUT    /api/mcp/config       MCP server 开关 { enabled }（仅 --features mcp 构建）
+//!   /mcp                          MCP server 端点（Streamable HTTP；见 mcp.rs 与 MCP_PATH）
 //!   GET    /api/notes?folder=ID  笔记列表
 //!   GET    /api/notes/{id}       笔记详情
 //!   GET    /api/tags             标签列表（含篇数）
@@ -82,6 +84,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/settings/schema", get(settings_schema))
         // UI 语言持久化（前端切换/启动时写）：插件经免能力 host_call `system.locale` 读同一值
         .route("/api/locale", get(get_locale).put(put_locale))
+        // MCP server 运行时开关（仅 `--features mcp` 构建有意义，否则 404）
+        .route("/api/mcp/config", put(put_mcp_config))
         // 访问鉴权（access control）：登录取 token / 登出 / 读写访问控制设置
         .route("/api/auth/login", post(auth_login))
         .route("/api/auth/logout", post(auth_logout))
@@ -102,6 +106,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/events", get(events_sse))
         // 插件管理路由（feature off = 空路由）。挂在只读/鉴权守卫之内 → 只读/未授权时插件写操作同样被拦。
         .merge(crate::plugins::api_router())
+        // MCP server（feature off = 空路由）。同样挂在守卫之内 —— 守卫会照常算出 Access 塞进扩展，
+        // 只是对这个路径不按 HTTP 方法拦截，门控下沉到各工具（见 MCP_PATH 与 mcp.rs）。
+        .merge(crate::mcp::router(state.clone()))
         // 只读守卫：只读模式下拦截一切写方法（/api/config 与 /api/auth/* 除外）。放在最内层，
         // 保证它能拿到 State 且早于任何 handler 运行。
         .layer(axum::middleware::from_fn_with_state(state.clone(), guard_read_only))
@@ -116,8 +123,20 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
+/// MCP 端点（Streamable HTTP）。JSON-RPC 全部压在这一个路径上，**连列工具都是 POST**，
+/// 所以按 HTTP 方法拦截的两道守卫对它一律失真——只读时会连 `tools/list` 都 403，
+/// 设了访问密码时匿名连工具清单都列不出。故两道守卫都放行这个路径，
+/// 改由工具层逐个门控（写工具查只读与 [`Access`]，读工具按 [`Scope`] 过滤），见 `mcp.rs`。
+pub(crate) const MCP_PATH: &str = "/mcp";
+
+fn is_mcp_path(path: &str) -> bool {
+    // StreamableHttpService 以 nest_service 挂载，其下还会有子路径
+    path == MCP_PATH || path.starts_with("/mcp/")
+}
+
 /// 只读强制拦截（核心安全保证）：只读开启时，凡写方法（POST/PUT/DELETE/PATCH）一律 403，
-/// 例外是 `/api/config`（否则无法在设置页把只读关回去）与 `/api/auth/*`（否则只读态无法登录/改密码）。
+/// 例外是 `/api/config`（否则无法在设置页把只读关回去）、`/api/auth/*`（否则只读态无法登录/改密码）
+/// 与 `/mcp`（见 [`MCP_PATH`]，改由工具层门控）。
 /// 读方法（GET/HEAD/OPTIONS）放行。按 HTTP 方法集中拦截 → 将来新增任何写路由自动被覆盖。
 async fn guard_read_only(State(state): State<Arc<AppState>>, req: Request, next: Next) -> Response {
     let is_write = matches!(
@@ -128,7 +147,7 @@ async fn guard_read_only(State(state): State<Arc<AppState>>, req: Request, next:
         req.uri().path(),
         // `/api/locale` 是 UI 偏好而非库数据：只读态也允许 owner 持久化语言（鉴权守卫照常）。
         "/api/config" | "/api/locale" | "/api/auth/login" | "/api/auth/logout" | "/api/auth/settings"
-    );
+    ) || is_mcp_path(req.uri().path());
     if is_write && !exempt && state.read_only.load(Ordering::Relaxed) {
         return (
             StatusCode::FORBIDDEN,
@@ -189,7 +208,9 @@ async fn guard_auth(State(state): State<Arc<AppState>>, mut req: Request, next: 
         );
         // 登录/登出不受写守卫拦（登录时还没 token）。注意 PUT /api/auth/settings 不在此列 →
         // 匿名改访问控制设置会被下面拦成 401（未设密码时 Access=Full 才放行首次设置）。
-        let write_exempt = matches!(path, "/api/auth/login" | "/api/auth/logout");
+        // `/mcp` 同样放行到工具层：Access 已塞进扩展，读工具按 Scope 过滤、写工具自查 Full，
+        // 否则匿名连 tools/list 都列不出（见 MCP_PATH 注释）。
+        let write_exempt = matches!(path, "/api/auth/login" | "/api/auth/logout") || is_mcp_path(path);
         // 机密读端点（`/api/resources` 只匹配清单本身，`/api/resources/{id}` 二进制不在内）。
         // `/api/settings/schema` 回显 webdav 密码 / AI key / 私有笔记本名单 → 匿名不可读。
         let secret_read = matches!(
@@ -267,8 +288,11 @@ struct ApplyConfigReq {
     create_new: bool,
 }
 
+// 以下 DTO 与读写 handler 标 pub(crate)：MCP 工具层（mcp.rs）直接复用这一份 handler，
+// 而不是另写一套业务逻辑——可见范围过滤 / before-save 钩子 / 事件广播因此天然一致，
+// 不会随时间漂移。输出 DTO 只需类型可见（MCP 侧只做 Serialize），入参 DTO 的字段也要可见（要构造）。
 #[derive(Serialize)]
-struct FolderNode {
+pub(crate) struct FolderNode {
     id: String,
     title: String,
     note_count: usize,
@@ -276,7 +300,7 @@ struct FolderNode {
 }
 
 #[derive(Serialize)]
-struct NoteSummary {
+pub(crate) struct NoteSummary {
     id: String,
     title: String,
     updated_time: i64,
@@ -289,7 +313,7 @@ struct NoteSummary {
 }
 
 #[derive(Serialize)]
-struct NoteDetail {
+pub(crate) struct NoteDetail {
     id: String,
     title: String,
     body: String,
@@ -303,9 +327,9 @@ struct NoteDetail {
 }
 
 #[derive(Deserialize)]
-struct UpdateNoteReq {
-    title: String,
-    body: String,
+pub(crate) struct UpdateNoteReq {
+    pub(crate) title: String,
+    pub(crate) body: String,
 }
 
 #[derive(Deserialize)]
@@ -314,23 +338,23 @@ struct MoveNoteReq {
 }
 
 #[derive(Deserialize)]
-struct CreateNoteReq {
-    parent_id: String,
+pub(crate) struct CreateNoteReq {
+    pub(crate) parent_id: String,
     #[serde(default)]
-    title: String,
+    pub(crate) title: String,
     #[serde(default)]
-    body: String,
+    pub(crate) body: String,
     /// 是否建为待办（is_todo: 1）。
     #[serde(default)]
-    is_todo: bool,
+    pub(crate) is_todo: bool,
 }
 
 #[derive(Deserialize)]
-struct CreateFolderReq {
+pub(crate) struct CreateFolderReq {
     #[serde(default)]
-    parent_id: String, // 空 = 根
+    pub(crate) parent_id: String, // 空 = 根
     #[serde(default)]
-    title: String,
+    pub(crate) title: String,
 }
 
 #[derive(Deserialize)]
@@ -344,7 +368,7 @@ struct RenameFolderReq {
 }
 
 #[derive(Serialize)]
-struct FolderRef {
+pub(crate) struct FolderRef {
     id: String,
     title: String,
     parent_id: String,
@@ -834,10 +858,75 @@ async fn settings_schema(State(state): State<Arc<AppState>>) -> Json<serde_json:
             ]
         }));
     }
+    // MCP 段仅在本构建含 MCP server 时出现（需 `--features mcp`）。
+    // endpoint / command 的值是**模板**：服务端不知道客户端是从哪个地址访问它的（127.0.0.1?
+    // 局域网 IP? 反代域名?），也不该知道浏览器里的会话 token，故留 {origin} / {header}
+    // 两个占位符由前端按运行时实际情况填（见 settingsSchema.ts::fillPlaceholders）。
+    if crate::mcp::ENABLED {
+        let enabled = state.config.lock().unwrap().mcp_enabled();
+        let shown_if_on = json!({ "field": "enabled", "truthy": true });
+        sections.push(json!({
+            "id": "mcp",
+            "title_key": "settings.section.mcp",
+            "icon": "plug",
+            "scope": "server",
+            "desc_key": "settings.mcp.desc",
+            "search_keys": ["settings.mcp.enabled", "settings.mcp.endpoint", "settings.mcp.command"],
+            "fields": [
+                { "key": "enabled", "type": "bool", "label_key": "settings.mcp.enabled",
+                  "desc_key": "settings.mcp.enabledDesc" },
+                { "key": "endpoint", "type": "copy", "label_key": "settings.mcp.endpoint",
+                  "show_if": shown_if_on },
+                { "key": "command", "type": "copy", "label_key": "settings.mcp.command",
+                  "desc_key": "settings.mcp.commandDesc", "show_if": shown_if_on },
+                { "key": "tools", "type": "note", "label_key": "settings.mcp.tools",
+                  "show_if": shown_if_on }
+            ],
+            "values": {
+                "enabled": enabled,
+                "endpoint": format!("{{origin}}{MCP_PATH}"),
+                "command": format!("claude mcp add --transport http jasper {{origin}}{MCP_PATH}{{header}}"),
+                "tools": crate::mcp::TOOL_NAMES.join("、")
+            },
+            "actions": [
+                { "id": "save", "label_key": "settings.mcp.save", "variant": "primary",
+                  "request": { "method": "PUT", "url": "/api/mcp/config", "convention": "status" },
+                  "on_success": "saved" }
+            ]
+        }));
+    }
     sections.push(appearance);
     sections.push(editor);
 
     Json(json!({ "sections": sections }))
+}
+
+#[derive(Deserialize)]
+struct McpConfigReq {
+    enabled: bool,
+}
+
+/// PUT /api/mcp/config —— MCP server 运行时开关。只有 `enabled` 一个可变项：
+/// 端点地址由服务绑定地址决定、工具集由构建决定，都不是配置。
+/// 注意本路由**不**豁免只读/鉴权守卫（它是普通的 `/api/*` 写端点，不是 MCP 端点本身）——
+/// 只读态下不可改、匿名不可改，与其它设置一致。
+async fn put_mcp_config(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<McpConfigReq>,
+) -> StatusCode {
+    if !crate::mcp::ENABLED {
+        return StatusCode::NOT_FOUND; // 本构建没有 MCP，没有可配置的东西
+    }
+    match state.config.lock().unwrap().set_mcp_enabled(req.enabled) {
+        Ok(()) => {
+            tracing::info!(enabled = req.enabled, "mcp server toggled");
+            StatusCode::NO_CONTENT
+        }
+        Err(e) => {
+            tracing::warn!("failed to persist mcp switch: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
 }
 
 // ---------- 读 handlers ----------
@@ -893,7 +982,7 @@ fn build_visible_subtree(lib: &Library, id: &str, visible: &HashSet<String>) -> 
     }
 }
 
-async fn folders(
+pub(crate) async fn folders(
     State(state): State<Arc<AppState>>,
     Extension(access): Extension<Access>,
 ) -> Json<Vec<FolderNode>> {
@@ -919,11 +1008,11 @@ async fn folders(
 }
 
 #[derive(Deserialize)]
-struct NotesQuery {
-    folder: Option<String>,
+pub(crate) struct NotesQuery {
+    pub(crate) folder: Option<String>,
 }
 
-async fn notes_list(
+pub(crate) async fn notes_list(
     State(state): State<Arc<AppState>>,
     Extension(access): Extension<Access>,
     Query(q): Query<NotesQuery>,
@@ -937,7 +1026,7 @@ async fn notes_list(
     Json(lib.notes_in_folder_sorted(&folder).into_iter().map(summarize).collect())
 }
 
-async fn note_detail(
+pub(crate) async fn note_detail(
     State(state): State<Arc<AppState>>,
     Extension(access): Extension<Access>,
     Path(id): Path<String>,
@@ -952,7 +1041,7 @@ async fn note_detail(
 }
 
 #[derive(Serialize)]
-struct TagInfo {
+pub(crate) struct TagInfo {
     id: String,
     title: String,
     /// 打了该标签且仍存在的笔记数。
@@ -960,7 +1049,7 @@ struct TagInfo {
 }
 
 /// GET /api/tags —— 全部标签（按标题排序，含篇数）。匿名受限时篇数只数可见笔记、零可见的标签隐藏。
-async fn tags_list(
+pub(crate) async fn tags_list(
     State(state): State<Arc<AppState>>,
     Extension(access): Extension<Access>,
 ) -> Json<Vec<TagInfo>> {
@@ -990,7 +1079,7 @@ async fn tags_list(
 }
 
 /// GET /api/tags/{id}/notes —— 打了某标签的笔记（按更新时间倒序），过滤到可见笔记本。
-async fn tag_notes(
+pub(crate) async fn tag_notes(
     State(state): State<Arc<AppState>>,
     Extension(access): Extension<Access>,
     Path(id): Path<String>,
@@ -1010,7 +1099,7 @@ async fn tag_notes(
 }
 
 #[derive(Serialize)]
-struct TagRef {
+pub(crate) struct TagRef {
     id: String,
     title: String,
 }
@@ -1020,12 +1109,12 @@ fn tag_ref(t: &crate::model::Tag) -> TagRef {
 }
 
 #[derive(Deserialize)]
-struct AddTagReq {
-    title: String,
+pub(crate) struct AddTagReq {
+    pub(crate) title: String,
 }
 
 /// GET /api/notes/{id}/tags —— 某笔记的标签（按标题排序）。笔记所在笔记本不可见 → 404（同 note_detail）。
-async fn note_tags_list(
+pub(crate) async fn note_tags_list(
     State(state): State<Arc<AppState>>,
     Extension(access): Extension<Access>,
     Path(id): Path<String>,
@@ -1052,7 +1141,7 @@ enum TagPlan {
 /// POST /api/notes/{id}/tags —— 给笔记打标签 { title }。
 /// 语义对齐 Joplin `addNoteTagByTitle`：标题 trim + 不区分大小写复用已有标签，
 /// 不存在则新建（type_=5），再建 note_tag 关联（type_=6）；笔记已有该标签则幂等。
-async fn add_note_tag(
+pub(crate) async fn add_note_tag(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(req): Json<AddTagReq>,
@@ -1108,7 +1197,7 @@ async fn add_note_tag(
 
 /// DELETE /api/notes/{id}/tags/{tag_id} —— 从笔记去掉某标签（删 note_tag 关联，保留标签本身）。
 /// 对齐 Joplin `removeNote`：删除该 (note,tag) 的全部关联；无关联则幂等返回当前标签。
-async fn remove_note_tag(
+pub(crate) async fn remove_note_tag(
     State(state): State<Arc<AppState>>,
     Path((id, tag_id)): Path<(String, String)>,
 ) -> Result<Json<Vec<TagRef>>, StatusCode> {
@@ -1358,11 +1447,11 @@ async fn delete_resource(State(state): State<Arc<AppState>>, Path(id): Path<Stri
 }
 
 #[derive(Deserialize)]
-struct SearchQuery {
-    q: Option<String>,
+pub(crate) struct SearchQuery {
+    pub(crate) q: Option<String>,
 }
 
-async fn search(
+pub(crate) async fn search(
     State(state): State<Arc<AppState>>,
     Extension(access): Extension<Access>,
     Query(sq): Query<SearchQuery>,
@@ -1468,7 +1557,7 @@ async fn persist_note(state: &Arc<AppState>, id: String, content: String) -> Res
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-async fn update_note(
+pub(crate) async fn update_note(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(req): Json<UpdateNoteReq>,
@@ -1518,7 +1607,7 @@ async fn move_note(
     Ok(Json(detail_of(&n)))
 }
 
-async fn create_note(
+pub(crate) async fn create_note(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateNoteReq>,
 ) -> Result<Json<NoteDetail>, StatusCode> {
@@ -1547,7 +1636,7 @@ async fn create_note(
 }
 
 /// POST /api/folders —— 新建笔记本。parent_id 空=根，非空须为已存在笔记本。
-async fn create_folder(
+pub(crate) async fn create_folder(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateFolderReq>,
 ) -> Result<Json<FolderRef>, StatusCode> {
@@ -1666,7 +1755,7 @@ const CASCADE_EVENT_LIMIT: usize = 64;
 /// 中途某条删失败即止：已删成功的那部分照样同步进内存索引（不让索引里留下盘上已没有的条目），
 /// 整体报 500 让前端重拉。资源与 note_tag 关联条目不动——与 [`delete_note`] 同一口径
 /// （note_tag 悬挂到已删笔记时不会进标签索引，孤儿资源在资源管理里统一清理）。
-async fn delete_folder(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> StatusCode {
+pub(crate) async fn delete_folder(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> StatusCode {
     let storage = match storage_of(&state) {
         Some(s) => s,
         None => return StatusCode::SERVICE_UNAVAILABLE,
@@ -1730,7 +1819,7 @@ async fn delete_folder(State(state): State<Arc<AppState>>, Path(id): Path<String
     }
 }
 
-async fn delete_note(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> StatusCode {
+pub(crate) async fn delete_note(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> StatusCode {
     let storage = match storage_of(&state) {
         Some(s) => s,
         None => return StatusCode::SERVICE_UNAVAILABLE,
@@ -2000,8 +2089,13 @@ mod tests {
         let body = body_json(send(state, "GET", "/api/settings/schema", "", None).await).await;
         let sections = body["sections"].as_array().unwrap();
         let ids: Vec<&str> = sections.iter().map(|s| s["id"].as_str().unwrap()).collect();
-        // plugins=None → 无 ai 段；顺序固定
-        assert_eq!(ids, ["data-source", "access-control", "appearance", "editor"]);
+        // plugins=None → 无 ai 段；顺序固定。mcp 段只在 --features mcp 构建里出现。
+        let expected: &[&str] = if crate::mcp::ENABLED {
+            &["data-source", "access-control", "mcp", "appearance", "editor"]
+        } else {
+            &["data-source", "access-control", "appearance", "editor"]
+        };
+        assert_eq!(ids, expected);
         // 数据源段：带字段 / 当前值 / connect 动作
         let ds = &sections[0];
         assert!(ds["fields"].as_array().unwrap().iter().any(|f| f["key"] == "source_type"));
@@ -2017,6 +2111,62 @@ mod tests {
         let appearance = sections.iter().find(|s| s["id"] == "appearance").unwrap();
         assert_eq!(appearance["scope"], "client");
         assert!(appearance.get("values").is_none());
+    }
+
+    /// MCP 段：默认开、下发的 endpoint/command 是**带占位符的模板**（服务端不知道客户端
+    /// 从哪个地址访问、更不该知道浏览器里的 token，故不能在这里拼死），工具清单非空。
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn settings_schema_exposes_mcp_section() {
+        let state = state_with_auth(auth_config(None, false, "none", &[]));
+        let body = body_json(send(state.clone(), "GET", "/api/settings/schema", "", None).await).await;
+        let mcp = body["sections"].as_array().unwrap().iter().find(|s| s["id"] == "mcp").unwrap().clone();
+
+        assert_eq!(mcp["values"]["enabled"], true); // 未设置过 → 默认开
+        let endpoint = mcp["values"]["endpoint"].as_str().unwrap();
+        let command = mcp["values"]["command"].as_str().unwrap();
+        assert_eq!(endpoint, "{origin}/mcp");
+        assert!(command.contains("{origin}/mcp") && command.contains("{header}"), "命令应留占位符: {command}");
+        assert!(!command.contains("Bearer "), "服务端不该把 token 拼进命令");
+        let tools = mcp["values"]["tools"].as_str().unwrap();
+        assert!(tools.contains("search_notes") && tools.contains("delete_folder"), "工具清单: {tools}");
+        assert_eq!(mcp["actions"][0]["request"]["url"], "/api/mcp/config");
+
+        // 关掉 → 描述符回显 false（开关落 config.db）
+        assert_eq!(
+            send(state.clone(), "PUT", "/api/mcp/config", r#"{"enabled":false}"#, None).await.status(),
+            StatusCode::NO_CONTENT
+        );
+        let body = body_json(send(state, "GET", "/api/settings/schema", "", None).await).await;
+        let mcp = body["sections"].as_array().unwrap().iter().find(|s| s["id"] == "mcp").unwrap().clone();
+        assert_eq!(mcp["values"]["enabled"], false);
+    }
+
+    /// MCP 端点从两道「按 HTTP 方法」的守卫里豁免（否则只读态连 tools/list 都 403、
+    /// 匿名连工具清单都列不出），门控下沉到工具层——这里只验证守卫确实没拦下它。
+    /// 关掉开关后整个端点 503。
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn mcp_endpoint_bypasses_method_guards_and_honors_switch() {
+        // 只读 + 设了密码的匿名请求：若被守卫拦，会是 403/401；豁免后应走到 MCP 自身的处理
+        let state = state_full(true, auth_config(Some("pw"), false, "none", &[]));
+        let st = send(state.clone(), "POST", "/mcp", r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#, None)
+            .await
+            .status();
+        assert_ne!(st, StatusCode::FORBIDDEN, "只读守卫不该拦 MCP（一切 MCP 请求都是 POST）");
+        assert_ne!(st, StatusCode::UNAUTHORIZED, "鉴权守卫不该拦 MCP（门控在工具层）");
+
+        // 关掉开关 → 端点整体 503（config 写入不受只读守卫影响：/api/mcp/config 需 Full，
+        // 故这里换一个未设密码、非只读的 state 来验证）
+        let state = state_with_auth(auth_config(None, false, "none", &[]));
+        assert_eq!(
+            send(state.clone(), "PUT", "/api/mcp/config", r#"{"enabled":false}"#, None).await.status(),
+            StatusCode::NO_CONTENT
+        );
+        let st = send(state, "POST", "/mcp", r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#, None)
+            .await
+            .status();
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE);
     }
 
     /// 设置描述符是机密读：设了密码后匿名 401，登录后 200 且回显访问控制当前值。

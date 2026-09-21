@@ -4,7 +4,7 @@
   // provider-config），show_if 条件显隐，options_source 动态选项，actions 按 config-result/status
   // 约定提交 + on_success（reload/relogin/saved）。纯逻辑在 settingsSchema.ts（可单测）。
   import { onMount } from 'svelte'
-  import { api, type FolderNode } from './api'
+  import { api, getAuthToken, type FolderNode } from './api'
   import { t, getLocale, setLocale, availableLocales, localeName } from './i18n.svelte'
   import Icon from './Icon.svelte'
   import Button from './Button.svelte'
@@ -15,6 +15,7 @@
   import {
     evalShowIf,
     resolveLabel,
+    fillPlaceholders,
     buildRequestBody,
     interpretResult,
     readClientValue,
@@ -177,7 +178,7 @@
     }
     saving = true
     try {
-      const body = buildRequestBody(section.id, action, submitValues)
+      const body = buildRequestBody(section.id, action, submitValues, section.fields)
       const res = await api.sendSettingsAction(action.request.method, action.request.url, body)
       const result = interpretResult(action.request.convention, res.ok, res.body)
       if (!result.ok) {
@@ -226,6 +227,24 @@
   function secretPlaceholder(f: SettingsField): string {
     if (f.writeonly && f.set_flag && values[f.set_flag]) return t('form.secretSetPh')
     return resolveLabel(f.placeholder_key)
+  }
+
+  // 展示型字段（copy/note）的文本：服务端下发的是模板，这里补上它不可能知道的运行时信息
+  // （当前访问地址、浏览器里的会话 token）。
+  function displayText(f: SettingsField): string {
+    return fillPlaceholders(String(values[f.key] ?? ''), window.location.origin, getAuthToken())
+  }
+
+  // 复制成功的字段 key（图标短暂变对勾）。
+  let copiedKey = $state<string | null>(null)
+  async function copyField(f: SettingsField) {
+    try {
+      await navigator.clipboard.writeText(displayText(f))
+      copiedKey = f.key
+      setTimeout(() => (copiedKey = null), 1500)
+    } catch {
+      /* 剪贴板不可用（非安全上下文/无权限）：输入框是可选中的，用户可手动复制 */
+    }
   }
 </script>
 
@@ -301,6 +320,27 @@
             {/each}
           </div>
         </div>
+      {:else if f.type === 'copy'}
+        <div class="field">
+          {#if f.label_key}<span class="field-label">{resolveLabel(f.label_key)}</span>{/if}
+          <div class="copy-row">
+            <input class="copy-input" readonly value={displayText(f)} onfocus={(e) => e.currentTarget.select()} />
+            <Button
+              variant="ghost"
+              iconOnly
+              icon={copiedKey === f.key ? 'check' : 'braces'}
+              label={t('common.copy')}
+              onclick={() => copyField(f)}
+            />
+          </div>
+          {#if f.desc_key}<p class="tip">{resolveLabel(f.desc_key)}</p>{/if}
+        </div>
+      {:else if f.type === 'note'}
+        <div class="field">
+          {#if f.label_key}<span class="field-label">{resolveLabel(f.label_key)}</span>{/if}
+          <p class="note-text">{displayText(f)}</p>
+          {#if f.desc_key}<p class="tip">{resolveLabel(f.desc_key)}</p>{/if}
+        </div>
       {:else if f.type === 'multiline'}
         <label class="field">
           {#if f.label_key}<span class="field-label">{resolveLabel(f.label_key)}</span>{/if}
@@ -352,6 +392,27 @@
 <style>
   .section {
     max-width: 520px;
+  }
+  /* 展示型字段（copy/note）：只读，视觉上与可编辑输入拉开距离 */
+  .copy-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .copy-input {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    background: var(--hover);
+    cursor: text;
+  }
+  .note-text {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--text-dim);
+    word-break: break-word;
   }
   h3 {
     margin: 0 0 4px;
