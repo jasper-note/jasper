@@ -48,6 +48,9 @@ impl EventBus {
     pub fn folder_changed(&self, id: &str) {
         self.emit("folder", "upsert", id);
     }
+    pub fn folder_deleted(&self, id: &str) {
+        self.emit("folder", "delete", id);
+    }
     /// 某笔记的标签集变化（打/去标签）。`id` 为受影响的笔记 id，
     /// 前端据此刷新侧栏标签区（含篇数）+ 该笔记打开时的标签行。
     pub fn tags_changed(&self, note_id: &str) {

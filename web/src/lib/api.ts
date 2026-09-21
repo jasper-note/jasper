@@ -299,6 +299,7 @@ type WasmInstance = {
   createFolder(parentId: string, title: string, now: number): string
   renameFolder(id: string, title: string, now: number): string
   moveFolder(id: string, newParent: string, now: number): string
+  deleteFolder(id: string): void
   addNoteTag(noteId: string, title: string, now: number): string
   removeNoteTag(noteId: string, tagId: string): string
   upsertResourceMeta(id: string, title: string, mime: string, ext: string, size: number, now: number): string
@@ -493,6 +494,11 @@ const httpApi = {
     sendJson<FolderRef>(`/api/folders/${id}`, 'PUT', { title }),
   moveFolder: (id: string, parentId: string) =>
     sendJson<FolderRef>(`/api/folders/${id}/move`, 'PUT', { parent_id: parentId }),
+  // 删除笔记本：服务端级联删掉子笔记本与其中全部笔记
+  deleteFolder: async (id: string) => {
+    const res = await fetch(`/api/folders/${id}`, { method: 'DELETE', headers: authHeaders() })
+    if (!res.ok) throw new Error(`DELETE -> ${res.status}`)
+  },
   notes: (folderId: string) =>
     getJson<NoteSummary[]>(`/api/notes?folder=${encodeURIComponent(folderId)}`),
   note: (id: string) => getJson<NoteDetail>(`/api/notes/${id}`),
@@ -940,6 +946,11 @@ const localApi = {
     const f = JSON.parse(i.moveFolder(id, parentId, Date.now())) as FolderRef
     await persistLocal(i)
     return f
+  },
+  deleteFolder: async (id: string): Promise<void> => {
+    const i = await localInst()
+    i.deleteFolder(id)
+    await persistLocal(i)
   },
   addNoteTag: async (noteId: string, title: string): Promise<TagRef[]> => {
     const i = await localInst()

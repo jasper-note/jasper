@@ -41,6 +41,12 @@ const zh = {
 	'notebook.namePrompt': '新笔记本名称：',
 	'notebook.defaultName': '新笔记本',
 	'notebook.renamePrompt': '笔记本新名称：',
+	'notebook.delete': '删除笔记本',
+	'notebook.confirmDeleteEmpty': '删除空笔记本「{title}」？',
+	'notebook.confirmDeleteNotes': '删除笔记本「{title}」及其中的 {notes} 篇笔记？无法撤销。',
+	'notebook.confirmDelete':
+		'删除笔记本「{title}」及其中的 {folders} 个子笔记本、{notes} 篇笔记？无法撤销。',
+	'notebook.deleteFailed': '删除笔记本失败：{err}',
 
 	// 演示横幅（main 段含 <b> 标记，用 {@html} 渲染）
 	'demo.banner':
@@ -346,6 +352,13 @@ const en: typeof zh = {
 	'notebook.namePrompt': 'New notebook name:',
 	'notebook.defaultName': 'New notebook',
 	'notebook.renamePrompt': 'New notebook name:',
+	'notebook.delete': 'Delete notebook',
+	'notebook.confirmDeleteEmpty': 'Delete the empty notebook “{title}”?',
+	'notebook.confirmDeleteNotes':
+		'Delete the notebook “{title}” and the {notes} note(s) in it? This cannot be undone.',
+	'notebook.confirmDelete':
+		'Delete the notebook “{title}”, its {folders} sub-notebook(s) and the {notes} note(s) in them? This cannot be undone.',
+	'notebook.deleteFailed': 'Failed to delete notebook: {err}',
 
 	'demo.banner':
 		'<b>Demo preview</b> · Runs entirely in your browser via Rust&nbsp;→&nbsp;WASM, <b>no backend</b>. Browse notebooks/notes, Markdown rendering (code · tables · math · task lists), and full-text search.',

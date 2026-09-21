@@ -214,7 +214,8 @@
   }
 
   async function applyRemoteChanges() {
-    const { folders: doFolders, list: doList, openNote, openNoteDeleted } = remotePending
+    const { folders: doFolders, openNote, openNoteDeleted } = remotePending
+    let doList = remotePending.list
     const { tags: doTags, openNoteTags } = remotePending
     remotePending.folders = remotePending.list = remotePending.openNote = false
     remotePending.openNoteDeleted = remotePending.tags = remotePending.openNoteTags = false
@@ -225,7 +226,18 @@
         detail = null
         saveLastNoteId(null)
       }
-      if (doFolders) folders = await api.folders()
+      if (doFolders) {
+        folders = await api.folders()
+        // 当前选中的笔记本已不在树上（被外部删除 / 级联删掉）→ 退回未选中态，
+        // 否则接下来的 refreshList 会去拉一个不存在的笔记本。
+        if (selectedFolderId != null && !folderExists(folders, selectedFolderId)) {
+          selectedFolderId = null
+          saveLastFolderId(null)
+          listTitle = ''
+          notes = []
+          doList = false
+        }
+      }
       // 标签篇数随笔记增删/打标签变化 → 侧栏标签区随笔记本树或 tag 事件刷新
       if (doFolders || doTags) void loadTags()
       if (openNoteTags) tagRefreshToken++ // 打开的笔记标签被外部改动 → NoteTags 重载
@@ -618,6 +630,53 @@
     }
   }
 
+  // 删除笔记本：级联删掉整棵子树（子笔记本 + 其中全部笔记），不可撤销 → 先 confirm 报清条数。
+  // 删完若当前选中的笔记本 / 打开的笔记正在这棵子树里，一并清掉（它们已经不存在了）。
+  async function deleteFolder(folder: FolderNode) {
+    const subtreeIds = new Set<string>()
+    let subFolders = 0
+    let noteCount = 0
+    const walk = (f: FolderNode, isRoot: boolean) => {
+      subtreeIds.add(f.id)
+      if (!isRoot) subFolders++
+      noteCount += f.note_count
+      for (const c of f.children) walk(c, false)
+    }
+    walk(folder, true)
+
+    const title = folder.title || t('common.unnamed')
+    // 三档文案：空笔记本 / 只有笔记 / 还有子笔记本——避免出现「0 个子笔记本」这种别扭说法
+    let msg: string
+    if (subFolders + noteCount === 0) msg = t('notebook.confirmDeleteEmpty', { title })
+    else if (subFolders === 0) msg = t('notebook.confirmDeleteNotes', { title, notes: noteCount })
+    else msg = t('notebook.confirmDelete', { title, folders: subFolders, notes: noteCount })
+    if (!confirm(msg)) return
+
+    try {
+      await api.deleteFolder(folder.id)
+    } catch (e) {
+      error = t('notebook.deleteFailed', { err: `${e}` })
+      return
+    }
+    // 打开的笔记就在被删子树里 → 关掉（已无处可保存）
+    if (detail && subtreeIds.has(detail.parent_id)) {
+      detail = null
+      selectedNoteId = null
+      saveLastNoteId(null)
+    }
+    folders = await api.folders()
+    if (selectedFolderId != null && subtreeIds.has(selectedFolderId)) {
+      // 选中的笔记本没了 → 退回「未选中」态（列表清空），不擅自替用户选别的笔记本
+      selectedFolderId = null
+      saveLastFolderId(null)
+      listTitle = ''
+      notes = []
+    } else {
+      await refreshList()
+    }
+    void loadTags() // 笔记连同标签关联一起消失 → 侧栏标签篇数变了
+  }
+
   // 新建笔记本（顶层）：名称走浏览器 prompt（带本地化默认名），建好后选中
   async function handleNewFolder() {
     const name = (prompt(t('notebook.namePrompt'), t('notebook.defaultName')) ?? '').trim()
@@ -834,6 +893,7 @@
         onMoveNote={readOnly ? undefined : moveNote}
         onMoveFolder={readOnly ? undefined : moveFolder}
         onRenameFolder={readOnly ? undefined : renameFolder}
+        onDeleteFolder={readOnly ? undefined : deleteFolder}
       />
       <TagList {tags} selectedId={searchMode ? null : selectedTagId} onSelect={selectTag} />
       <!-- 插件面板入口（左栏底部，spec §9.4）；只读下命令端点全被拦，一并隐藏 -->

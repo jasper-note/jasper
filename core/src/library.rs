@@ -342,6 +342,33 @@ impl Library {
         out
     }
 
+    /// 某笔记本子树内的全部笔记 id（自身 + 各层后代笔记本的直属笔记）。
+    /// 用于级联删除笔记本：调用方据此逐条从存储删除再同步内存。
+    /// `root` 为空串（未分类根）或不存在 → 空。
+    pub fn subtree_note_ids(&self, root: &str) -> Vec<String> {
+        self.subtree_folder_ids(root)
+            .iter()
+            .filter_map(|fid| self.notes_by_folder.get(fid))
+            .flatten()
+            .cloned()
+            .collect()
+    }
+
+    /// 批量删除笔记本与笔记（写回成功后同步内存；索引只重建一次）。
+    /// 级联删除笔记本子树用：调用方先据 [`Self::subtree_folder_ids`] /
+    /// [`Self::subtree_note_ids`] 取 id，**存储删成功多少就传多少**，
+    /// 保证内存索引与存储一致（部分失败时不至于凭空少掉还在盘上的条目）。
+    pub fn remove_folders_and_notes(&mut self, folder_ids: &[String], note_ids: &[String]) {
+        for id in note_ids {
+            self.notes.remove(id);
+            self.raw_notes.remove(id);
+        }
+        for id in folder_ids {
+            self.folders.remove(id);
+        }
+        self.build_indexes();
+    }
+
     /// 新增或更新一个资源（上传成功后同步内存，使 /api/resources 能拿到 mime）。返回资源 id。
     pub fn upsert_resource(&mut self, content: &str) -> anyhow::Result<String> {
         let raw = parser::parse_item(content)?;
@@ -562,6 +589,54 @@ mod tests {
         assert!(lib.is_self_or_descendant(&b, &c)); // 直接子
         assert!(!lib.is_self_or_descendant(&c, &a)); // 祖先不是后代 → 允许
         assert!(!lib.is_self_or_descendant(&a, &d)); // 无关分支
+    }
+
+    /// 级联删除笔记本子树：subtree_note_ids 收全各层笔记，
+    /// remove_folders_and_notes 删完后索引（树/篇数/搜索）同步干净，无关分支不受影响。
+    #[test]
+    fn subtree_notes_and_cascade_removal() {
+        // A -> B -> C（各一篇笔记），D 是独立根（一篇笔记）
+        let (a, b, c, d) = (hid(0xa0), hid(0xb0), hid(0xc0), hid(0xd0));
+        let (n_a, n_b, n_c, n_d) = (hid(1), hid(2), hid(3), hid(4));
+        let contents = vec![
+            new_folder_md(&a, "", "A", 1),
+            new_folder_md(&b, &a, "B", 2),
+            new_folder_md(&c, &b, "C", 3),
+            new_folder_md(&d, "", "D", 4),
+            new_note_md(&n_a, &a, "na", "body a", false, 100),
+            new_note_md(&n_b, &b, "nb", "body b", false, 200),
+            new_note_md(&n_c, &c, "nc", "body c", false, 300),
+            new_note_md(&n_d, &d, "nd", "body d", false, 400),
+        ];
+        let (mut lib, _) = Library::from_contents(contents);
+
+        // B 子树 = B + C，笔记 = nb + nc（不含祖先 A 的 na，也不含无关的 nd）
+        let mut folders = lib.subtree_folder_ids(&b);
+        folders.sort();
+        let mut expect_folders = vec![b.clone(), c.clone()];
+        expect_folders.sort();
+        assert_eq!(folders, expect_folders);
+        let mut notes = lib.subtree_note_ids(&b);
+        notes.sort();
+        let mut expect_notes = vec![n_b.clone(), n_c.clone()];
+        expect_notes.sort();
+        assert_eq!(notes, expect_notes);
+
+        // 未分类根 / 不存在的 id 无子树
+        assert!(lib.subtree_note_ids("").is_empty());
+        assert!(lib.subtree_note_ids(&hid(0xee)).is_empty());
+
+        lib.remove_folders_and_notes(&folders, &notes);
+
+        assert!(!lib.folders.contains_key(&b) && !lib.folders.contains_key(&c));
+        assert!(!lib.notes.contains_key(&n_b) && !lib.notes.contains_key(&n_c));
+        assert!(lib.note_raw(&n_b).is_none()); // 原始内容一并释放
+        assert!(lib.child_folder_ids_sorted(&a).is_empty()); // 树索引已重建
+        assert!(lib.search("body b").is_empty());
+        // 无关分支完好
+        assert_eq!(lib.note_count(&a), 1);
+        assert_eq!(lib.note_count(&d), 1);
+        assert_eq!(lib.child_folder_ids_sorted(""), vec![a.clone(), d.clone()]);
     }
 
     // 造一个 tag（type_=5，带标题）/ note_tag（type_=6，纯元数据）条目内容。

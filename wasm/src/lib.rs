@@ -400,6 +400,22 @@ impl Demo {
         Ok(self.folder_ref_json(&id))
     }
 
+    /// 删除笔记本，级联删除其全部后代笔记本与其中的笔记（与 server 的
+    /// `DELETE /api/folders/{id}` 同语义）。「未分类」(空 id) 不是真笔记本，报错。
+    #[wasm_bindgen(js_name = deleteFolder)]
+    pub fn delete_folder(&mut self, id: &str) -> Result<(), JsError> {
+        if !self.lib.folders.contains_key(id) {
+            return Err(JsError::new("folder not found"));
+        }
+        let folders = self.lib.subtree_folder_ids(id);
+        let notes = self.lib.subtree_note_ids(id);
+        for key in folders.iter().chain(notes.iter()) {
+            self.raws.remove(key);
+        }
+        self.lib.remove_folders_and_notes(&folders, &notes);
+        Ok(())
+    }
+
     /// 给笔记打标签（trim + 不区分大小写复用/新建），返回该笔记的 TagRef[] JSON。
     #[wasm_bindgen(js_name = addNoteTag)]
     pub fn add_note_tag(&mut self, note_id: &str, title: &str, now: f64) -> Result<String, JsError> {

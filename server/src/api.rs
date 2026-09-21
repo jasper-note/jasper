@@ -9,6 +9,7 @@
 //!   POST   /api/folders          新建笔记本 { parent_id?, title }
 //!   PUT    /api/folders/{id}     重命名笔记本 { title }
 //!   PUT    /api/folders/{id}/move 移动笔记本（改 parent_id；防环）
+//!   DELETE /api/folders/{id}     删除笔记本（级联：子笔记本 + 其中全部笔记）
 //!   GET    /api/notes?folder=ID  笔记列表
 //!   GET    /api/notes/{id}       笔记详情
 //!   GET    /api/tags             标签列表（含篇数）
@@ -86,7 +87,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/auth/logout", post(auth_logout))
         .route("/api/auth/settings", get(get_auth_settings).put(put_auth_settings))
         .route("/api/folders", get(folders).post(create_folder))
-        .route("/api/folders/{id}", put(rename_folder))
+        .route("/api/folders/{id}", put(rename_folder).delete(delete_folder))
         .route("/api/folders/{id}/move", put(move_folder))
         .route("/api/notes", get(notes_list).post(create_note))
         .route("/api/notes/{id}", get(note_detail).put(update_note).delete(delete_note))
@@ -1655,6 +1656,80 @@ async fn move_folder(
     Ok(Json(resp))
 }
 
+/// 一次级联删除最多逐条广播多少事件；超过就折算成一条 library reload。
+/// 逐条事件能让前端精准关闭「正打开的笔记被删」，但整树删除动辄上百条，
+/// 既挤爆广播容量（对端 Lagged 后反正也要全量刷）又无谓刷屏。
+const CASCADE_EVENT_LIMIT: usize = 64;
+
+/// DELETE /api/folders/{id} —— 删除笔记本，**级联**删除其全部后代笔记本与其中的笔记。
+/// 「未分类」(空 id) 不是真笔记本，命中 NOT_FOUND。先删笔记、再删笔记本条目，
+/// 中途某条删失败即止：已删成功的那部分照样同步进内存索引（不让索引里留下盘上已没有的条目），
+/// 整体报 500 让前端重拉。资源与 note_tag 关联条目不动——与 [`delete_note`] 同一口径
+/// （note_tag 悬挂到已删笔记时不会进标签索引，孤儿资源在资源管理里统一清理）。
+async fn delete_folder(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> StatusCode {
+    let storage = match storage_of(&state) {
+        Some(s) => s,
+        None => return StatusCode::SERVICE_UNAVAILABLE,
+    };
+    let (folder_ids, note_ids) = {
+        let lib = state.library.read().unwrap();
+        if !lib.folders.contains_key(&id) {
+            return StatusCode::NOT_FOUND;
+        }
+        // 存储是扁平的 `<id>.md`，笔记本没有真实目录，删除顺序无关紧要
+        (lib.subtree_folder_ids(&id), lib.subtree_note_ids(&id))
+    };
+    tracing::debug!(folder_id = %id, folders = folder_ids.len(), notes = note_ids.len(), "deleting folder subtree");
+
+    let (fids, nids) = (folder_ids.clone(), note_ids.clone());
+    let res = tokio::task::spawn_blocking(move || {
+        let mut done_notes: Vec<String> = Vec::new();
+        let mut done_folders: Vec<String> = Vec::new();
+        let mut ok = true;
+        for nid in &nids {
+            if let Err(e) = storage.delete_item(&format!("{nid}.md")) {
+                tracing::warn!(note_id = %nid, "级联删除笔记失败: {e}");
+                ok = false;
+                break;
+            }
+            done_notes.push(nid.clone());
+        }
+        if ok {
+            for fid in &fids {
+                if let Err(e) = storage.delete_item(&format!("{fid}.md")) {
+                    tracing::warn!(folder_id = %fid, "级联删除笔记本失败: {e}");
+                    ok = false;
+                    break;
+                }
+                done_folders.push(fid.clone());
+            }
+        }
+        (ok, done_folders, done_notes)
+    })
+    .await;
+    let (ok, done_folders, done_notes) = match res {
+        Ok(x) => x,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR,
+    };
+
+    state.library.write().unwrap().remove_folders_and_notes(&done_folders, &done_notes);
+    if done_folders.len() + done_notes.len() > CASCADE_EVENT_LIMIT {
+        state.events.library_reloaded();
+    } else {
+        for nid in &done_notes {
+            state.events.note_deleted(nid);
+        }
+        for fid in &done_folders {
+            state.events.folder_deleted(fid);
+        }
+    }
+    if ok {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    }
+}
+
 async fn delete_note(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> StatusCode {
     let storage = match storage_of(&state) {
         Some(s) => s,
@@ -1786,6 +1861,7 @@ mod tests {
         assert_eq!(status_of(state_with_read_only(true), "PUT", "/api/notes/abc", "{}").await, StatusCode::FORBIDDEN);
         assert_eq!(status_of(state_with_read_only(true), "POST", "/api/folders", "{}").await, StatusCode::FORBIDDEN);
         assert_eq!(status_of(state_with_read_only(true), "PUT", "/api/folders/abc", "{}").await, StatusCode::FORBIDDEN);
+        assert_eq!(status_of(state_with_read_only(true), "DELETE", "/api/folders/abc", "").await, StatusCode::FORBIDDEN);
         // 读方法放行（空库 → 200）
         assert_eq!(status_of(state_with_read_only(true), "GET", "/api/folders", "").await, StatusCode::OK);
         // /api/config 豁免（PUT 不应被守卫拦成 403）
@@ -2425,6 +2501,65 @@ mod tests {
             send_json(state_with_read_only(true), "DELETE", &format!("/api/notes/{id}/tags/{}", "2".repeat(32)), "").await.0,
             StatusCode::FORBIDDEN
         );
+    }
+
+    /// 删除笔记本：级联删掉整棵子树（子笔记本 + 其中全部笔记），落盘与内存索引同步；
+    /// 兄弟分支与「未分类」笔记不受牵连；未分类根（空 id）与不存在的 id → 404。
+    #[tokio::test]
+    async fn delete_folder_cascades_subtree() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(crate::storage::local::LocalStorage::new(dir.path())) as Arc<dyn StorageBackend>;
+        let state = state_with_read_only(false);
+        *state.storage.write().unwrap() = Some(storage.clone());
+
+        // a(root) > b，独立 d(root)；a/b/d 各一篇笔记；外加一篇未分类笔记
+        let (contents, [a, b, d], [n_a, n_b, n_d]) = sample_contents();
+        let unfiled = "9".repeat(32);
+        let mut contents = contents;
+        contents.push(serialize::new_note_md(&unfiled, "", "未分类", "body u", false, 4));
+        for c in &contents {
+            let id = c.lines().find_map(|l| l.strip_prefix("id: ")).unwrap().to_string();
+            storage.put_item(&format!("{id}.md"), c).unwrap();
+        }
+        let (lib, _) = Library::from_contents(contents);
+        *state.library.write().unwrap() = lib;
+
+        // 删 a → a、子笔记本 b、两者的笔记全没了
+        let mut rx = state.events.subscribe();
+        let st = send(state.clone(), "DELETE", &format!("/api/folders/{a}"), "", None).await.status();
+        assert_eq!(st, StatusCode::NO_CONTENT);
+
+        let names: HashSet<String> = storage.list_items().unwrap().into_iter().map(|i| i.name).collect();
+        for gone in [&a, &b, &n_a, &n_b] {
+            assert!(!names.contains(&format!("{gone}.md")), "{gone} 应已从存储删除");
+        }
+        for kept in [&d, &n_d, &unfiled] {
+            assert!(names.contains(&format!("{kept}.md")), "{kept} 不该被牵连");
+        }
+        {
+            let lib = state.library.read().unwrap();
+            assert!(!lib.folders.contains_key(&a) && !lib.folders.contains_key(&b));
+            assert!(lib.note(&n_a).is_none() && lib.note(&n_b).is_none());
+            assert!(lib.folders.contains_key(&d) && lib.note(&n_d).is_some());
+            assert_eq!(lib.note_count(""), 1); // 未分类笔记还在
+        }
+        // 广播了逐条删除事件（条数少于 CASCADE_EVENT_LIMIT），前端据此关掉打开的笔记
+        let mut evs = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            evs.push((ev.kind, ev.op, ev.id));
+        }
+        assert!(evs.contains(&("note", "delete", n_a.clone())));
+        assert!(evs.contains(&("folder", "delete", a.clone())));
+        assert!(evs.contains(&("folder", "delete", b.clone())));
+
+        // /api/folders 里 a 与 b 都不在了，d 还在
+        let nodes = folders_json(state.clone()).await;
+        let ids: Vec<&str> = nodes.as_array().unwrap().iter().map(|n| n["id"].as_str().unwrap()).collect();
+        assert!(!ids.contains(&a.as_str()) && ids.contains(&d.as_str()));
+
+        // 再删一次（已不存在）→ 404
+        let st = send(state.clone(), "DELETE", &format!("/api/folders/{a}"), "", None).await.status();
+        assert_eq!(st, StatusCode::NOT_FOUND);
     }
 
     async fn folders_json(state: Arc<AppState>) -> serde_json::Value {

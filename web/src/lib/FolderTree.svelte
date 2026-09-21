@@ -15,6 +15,7 @@
     onMoveNote,
     onMoveFolder,
     onRenameFolder,
+    onDeleteFolder,
     depth = 0,
   }: {
     folders: FolderNode[]
@@ -23,6 +24,7 @@
     onMoveNote?: (noteId: string, folderId: string) => void
     onMoveFolder?: (folderId: string, parentId: string) => void
     onRenameFolder?: (folderId: string, currentTitle: string) => void
+    onDeleteFolder?: (folder: FolderNode) => void
     depth?: number
   } = $props()
 
@@ -135,7 +137,7 @@
 
         {#if onRenameFolder && f.id !== ''}
           <button
-            class="rename"
+            class="rowaction"
             title={t('common.rename')}
             aria-label={t('common.rename')}
             onclick={(e) => {
@@ -146,11 +148,34 @@
             <Icon name="edit" size={13} />
           </button>
         {/if}
+
+        {#if onDeleteFolder && f.id !== ''}
+          <button
+            class="rowaction danger"
+            title={t('notebook.delete')}
+            aria-label={t('notebook.delete')}
+            onclick={(e) => {
+              e.stopPropagation()
+              onDeleteFolder!(f)
+            }}
+          >
+            <Icon name="trash" size={13} />
+          </button>
+        {/if}
       </div>
 
       {#if f.children.length && isExpanded(f.id)}
         <div class="subtree" transition:slide={{ duration: 180, easing: cubicOut }}>
-          <Self folders={f.children} {selectedId} {onSelect} {onMoveNote} {onMoveFolder} {onRenameFolder} depth={depth + 1} />
+          <Self
+            folders={f.children}
+            {selectedId}
+            {onSelect}
+            {onMoveNote}
+            {onMoveFolder}
+            {onRenameFolder}
+            {onDeleteFolder}
+            depth={depth + 1}
+          />
         </div>
       {/if}
     </li>
@@ -271,9 +296,9 @@
     background: color-mix(in srgb, var(--accent) 20%, transparent);
     color: var(--accent);
   }
-  /* 重命名按钮：常驻占位（不引发悬停时布局跳动），默认隐藏且不可点，
+  /* 行内操作按钮（重命名 / 删除）：常驻占位（不引发悬停时布局跳动），默认隐藏且不可点，
      行悬停或键盘聚焦时显现。 */
-  .rename {
+  .rowaction {
     flex: 0 0 auto;
     width: 24px;
     height: 24px;
@@ -291,13 +316,16 @@
     pointer-events: none;
     transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
   }
-  .row:hover .rename,
-  .rename:focus-visible {
+  .row:hover .rowaction,
+  .rowaction:focus-visible {
     opacity: 1;
     pointer-events: auto;
   }
-  .rename:hover {
+  .rowaction:hover {
     background: var(--hover);
     color: var(--text);
+  }
+  .rowaction.danger:hover {
+    color: var(--danger);
   }
 </style>
