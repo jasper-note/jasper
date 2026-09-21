@@ -184,11 +184,12 @@
 
   function onRemoteChange(ev: ChangeEvent) {
     if (ev.kind === 'library') {
-      // 整库替换（数据源切换/服务重启后重连）：全量重载
+      // 整库替换（数据源切换/服务重启后重连/受限匿名的粗粒度事件）：全量刷新，但保留当前选中与
+      // 打开的笔记，见 reloadLibrary()
       clearTimeout(remoteTimer)
       remotePending.folders = remotePending.list = remotePending.openNote = false
       remotePending.openNoteDeleted = remotePending.tags = remotePending.openNoteTags = false
-      void checkStatus()
+      void reloadLibrary()
       return
     }
     if (ev.kind === 'folder') {
@@ -235,6 +236,47 @@
       }
     } catch {
       /* 网络抖动忽略；下一个事件会再触发 */
+    }
+  }
+
+  // library reload（数据源切换/服务重启后重连/受限匿名收到的粗粒度事件）：全量刷新树、标签、
+  // 列表，并把打开的笔记按 §5.3 保守规则（NoteView.applyExternal）对齐服务端——
+  // **保留 selectedNoteId，不重挂载 NoteView**。
+  // 旧实现直接调 checkStatus() → loadFolders() 会先把 selectedNoteId/detail 清空再恢复，
+  // 于是每收到一条 library reload 就销毁重建一次 CodeMirror：编辑区闪烁、光标丢失。
+  async function reloadLibrary() {
+    try {
+      applyStatusFlags(await api.status())
+    } catch {
+      /* 忽略；下一个事件会再触发 */
+    }
+    // 还没有任何选中（刚进来/上次恢复失败）→ 没什么可保的，走完整恢复流程
+    if (selectedNoteId == null && selectedFolderId == null && selectedTagId == null && !searchMode) {
+      await loadFolders()
+      return
+    }
+    try {
+      folders = await api.folders()
+      void loadTags()
+      // 正在看的笔记本已不存在（换了数据源/被删）→ 只有这种情况才整体重载回默认视图
+      const folderGone =
+        !searchMode &&
+        selectedTagId == null &&
+        selectedFolderId != null &&
+        selectedFolderId !== '' &&
+        !folderExists(folders, selectedFolderId)
+      if (folderGone) {
+        await loadFolders()
+        return
+      }
+      await refreshList()
+      if (selectedNoteId) {
+        const fresh = await api.note(selectedNoteId)
+        tagRefreshToken++ // 标签行也可能变了
+        if (noteView?.applyExternal(fresh)) detail = fresh
+      }
+    } catch {
+      /* 网络抖动/笔记已不可见：保持当前视图，绝不丢用户未保存的输入 */
     }
   }
 

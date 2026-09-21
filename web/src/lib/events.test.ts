@@ -72,6 +72,33 @@ describe('connectEvents', () => {
 		expect(got).toEqual([{ kind: 'library', op: 'reload', id: '' }])
 	})
 
+	it('带会话 token 时走查询串（EventSource 不能带 Authorization 头）', async () => {
+		localStorage.setItem('jasper.token', 'abc123')
+		try {
+			const { connectEvents } = await freshModule()
+			connectEvents(() => {})
+			expect(FakeEventSource.instances[0].url).toBe('/api/events?token=abc123')
+		} finally {
+			localStorage.removeItem('jasper.token')
+		}
+	})
+
+	it('token 变化（登录/登出）→ 关旧连接换新的，拿回细粒度事件', async () => {
+		const mod = await freshModule()
+		mod.connectEvents(() => {})
+		expect(FakeEventSource.instances[0].url).toBe('/api/events')
+
+		const api = await import('./api')
+		api.setAuthToken('tok')
+		expect(mod.connectEvents(() => {})).toBe(true)
+		expect(FakeEventSource.instances[0].closed).toBe(true)
+		expect(FakeEventSource.instances[1].url).toBe('/api/events?token=tok')
+		// 同一 token 再连 → 幂等
+		expect(mod.connectEvents(() => {})).toBe(false)
+		expect(FakeEventSource.instances).toHaveLength(2)
+		api.setAuthToken(null)
+	})
+
 	it('disconnect 后可重新连接', async () => {
 		const { connectEvents, disconnectEvents } = await freshModule()
 		connectEvents(() => {})

@@ -145,6 +145,21 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
     (!t.is_empty()).then(|| t.to_string())
 }
 
+/// 从 `GET /api/events?token=<会话 token>` 的查询串取会话 token。
+///
+/// `EventSource` 不能自定义请求头（浏览器 API 限制），SSE 订阅因此带不了 `Authorization`，
+/// 会被一律判成 [`Access::Anonymous`]——受限匿名下每条事件都被粗化成 library reload，
+/// 前端只能全量重载（编辑中的笔记被销毁重建）。仅给这一个只读端点开查询串取 token 的口子，
+/// 其余端点照旧只认请求头，避免 token 落进日志与浏览器历史。
+fn sse_query_token(req: &Request) -> Option<String> {
+    if req.uri().path() != "/api/events" {
+        return None;
+    }
+    // 会话 token 是 hex 串（见 auth.rs），无需百分号解码。
+    let t = req.uri().query()?.split('&').find_map(|kv| kv.strip_prefix("token="))?;
+    (!t.is_empty()).then(|| t.to_string())
+}
+
 fn unauthorized() -> Response {
     (
         StatusCode::UNAUTHORIZED,
@@ -154,13 +169,14 @@ fn unauthorized() -> Response {
 }
 
 /// 鉴权守卫（access control）：
-/// 1. 据 Bearer token 定 [`Access`] 并塞进请求扩展，供各 handler 按可见范围过滤内容。
+/// 1. 据 Bearer token 定 [`Access`] 并塞进请求扩展，供各 handler 按可见范围过滤内容
+///    （`GET /api/events` 额外认 `?token=`，见 [`sse_query_token`]）。
 /// 2. 未授权（Anonymous）时：拦一切写方法（`/api/auth/login|logout` 除外——登录本身要能打），
 ///    并拦会泄露机密的读端点（`/api/config`、`/api/ai/config`、`GET /api/auth/settings`、
 ///    `GET /api/resources` 资源清单会暴露私有资源标题）。
 /// 未设访问密码时 Access 恒 Full → 以下判断都不触发，行为与无鉴权时完全一致（向后兼容）。
 async fn guard_auth(State(state): State<Arc<AppState>>, mut req: Request, next: Next) -> Response {
-    let token = bearer_token(req.headers());
+    let token = bearer_token(req.headers()).or_else(|| sse_query_token(&req));
     let access = state.auth.access_for(token.as_deref());
     req.extensions_mut().insert(access);
 
@@ -2208,6 +2224,42 @@ mod tests {
         let text = String::from_utf8_lossy(&frame);
         assert!(text.contains("event: change"), "SSE 帧: {text}");
         assert!(text.contains(r#""kind":"note""#) && text.contains("abc123"), "SSE 帧: {text}");
+    }
+
+    /// 设了访问密码时：EventSource 带不了 Authorization 头，故 `/api/events?token=` 也认 token。
+    /// 不带 token 的订阅是受限匿名 → 事件被粗化成 library reload；带上有效 token → 细粒度事件。
+    #[tokio::test]
+    async fn events_sse_accepts_query_token() {
+        use tokio_stream::StreamExt as _;
+
+        async fn first_frame(state: Arc<AppState>, uri: &str) -> String {
+            let req = Request::builder().method("GET").uri(uri).body(Body::empty()).unwrap();
+            let resp = router(state.clone()).oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            state.events.note_upserted("abc123");
+            let mut body = resp.into_body().into_data_stream();
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(5), body.next())
+                .await
+                .expect("5s 内应收到事件帧")
+                .expect("流不应结束")
+                .expect("帧不应出错");
+            String::from_utf8_lossy(&frame).into_owned()
+        }
+
+        // 有密码 + 不许无密码阅读 → 匿名可见范围为空（受限）
+        let state = state_with_auth(auth_config(Some("pw"), false, "none", &[]));
+        let resp = send(state.clone(), "POST", "/api/auth/login", "{\"password\":\"pw\"}", None).await;
+        let token = body_json(resp).await["token"].as_str().unwrap().to_string();
+
+        let anon = first_frame(state.clone(), "/api/events").await;
+        assert!(anon.contains(r#""kind":"library""#) && !anon.contains("abc123"), "匿名帧: {anon}");
+
+        let authed = first_frame(state.clone(), &format!("/api/events?token={token}")).await;
+        assert!(authed.contains(r#""kind":"note""#) && authed.contains("abc123"), "带 token 帧: {authed}");
+
+        // 无效 token 仍按匿名处理
+        let bogus = first_frame(state, "/api/events?token=deadbeef").await;
+        assert!(bogus.contains(r#""kind":"library""#), "坏 token 帧: {bogus}");
     }
 
     /// 保存原语是事件的单一咽喉：写入成功后广播 note upsert（插件直写路径共用此原语）。
