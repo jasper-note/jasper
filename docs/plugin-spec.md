@@ -12,7 +12,7 @@
 | 0.2 | 2026-07-02 | 向后兼容新增：`[[contributes.storage]]` 存储 provider（§3.9）、`host:http` 能力（§7）、`storage.*` 方法族（§6.5）、§10 增 `required`/`placeholder`、存储类调用限额修正（§11）、SMB/裸 TCP 非目标声明（§11）、v0.2 决策（§12.1） |
 | 0.3 | 2026-07-02 | 向后兼容新增：`notes:*`/`host:ai` 能力落地（§6.5/§7）、写确认=**提案回传**（§6.5/§7/§11）、`[[contributes.sidebar]]` 扩 `command`/`view`（§3.5）、widget 事件契约钉死（§9.2）、UiNode 交互约定（§9.3）、宿主端点 ui / ai-config / auto-approve（§9.5 新）、图标令牌 +3（§9.1）、§10 删除与宿主托管开关矛盾的示例、v0.3 决策（§12.2） |
 | 0.4 | 2026-07-03 | 向后兼容新增：`[[contributes.locale]]` 语言包贡献（§3.10）——插件给应用**增加一门界面语言**（catalog JSON = message key → 译文，缺失回落 base；零代码即可，同主题信任档）；`system.locale` 免能力 host 方法（§6.5）——插件读**当前 UI 语言**以本地化自己运行时的产出（宿主持久化 UI 语言）；widget/命令 result 的文本字段可为 **locale map**（§9.2.1）——插件**返回多语言 UI**、前端按当前语言挑、v0.4 决策（§12.3） |
-| 0.4（阶段 4） | 2026-07-04 | **落地既有契约**（apiVersion 不变）：`contributes.editor` → `editor.transform` 编辑期钩子（§3.7/§6.5/§8，端点 §9.5）——纯文本 in/out，前端仅源码模式接 `input` 相位、保守替换缓冲；widget 词汇扩充 `checkbox`/`select`/`divider`/`heading`（§9.2）；SDK `editor` 槽；v0.4 阶段 4 落地（§12.4） |
+| 0.4（阶段 4） | 2026-07-04 | **落地既有契约**（apiVersion 不变）：`contributes.editor` → `editor.transform` 编辑期钩子（§3.7/§6.5/§8，端点 §9.5）——纯文本 in/out，前端接 `input` 相位、保守替换缓冲（0.4 落地时仅源码模式；编辑器统一到 CodeMirror 6 后源码/实时预览两模式都接）；widget 词汇扩充 `checkbox`/`select`/`divider`/`heading`（§9.2）；SDK `editor` 槽；v0.4 阶段 4 落地（§12.4） |
 
 ---
 
@@ -152,7 +152,7 @@ view = "main"
 | `command` | string | ⬜ | 复用某命令；缺省调 `editor.transform`（§8）。**宿主本版仅实现 `editor.transform`**——`command` 复用后置，声明了也被忽略（向前兼容） |
 
 - 宿主实现约定：经 `POST /api/plugins/{id}/editor/transform`（§9.5）调 `editor.transform`；**纯文本 in/out，不带 notes/ai 上下文**（`notes.*` 得 `unsupported`，防写入重入）。
-- 前端接入约定（jasper）：**仅源码编辑器**（CodeMirror）接 `input` 相位——用户输入停顿（debounce）后依次调各声明插件、保守替换缓冲（等待期间用户又敲字则丢弃变换）；富文本模式不接（整篇重排风险高）。`before-save` 相位保留在契约里，前端接入后置（现有服务端 `hook.before_save`（§8）已覆盖保存前改写场景）。
+- 前端接入约定（jasper）：单个 CodeMirror 6 实例的**源码与实时预览两模式**都接 `input` 相位——用户输入停顿（debounce）后依次调各声明插件、保守替换缓冲（等待期间用户又敲字则丢弃变换）。`before-save` 相位保留在契约里，前端接入后置（现有服务端 `hook.before_save`（§8）已覆盖保存前改写场景）。
 
 ### 3.8 `[settings.schema]`
 
@@ -402,7 +402,7 @@ Message   = { role: "system"|"user"|"assistant", content: string }
 
 其它扩展点不靠 `hooks`，靠 `contributes.*` 声明触发：
 - **命令**：`contributes.command` + 触发（工具栏/面板）→ `command` 方法。
-- **编辑器**（0.4 阶段 4 落地）：`contributes.editor` → `editor.transform` 方法（`before-save` 作用于 body，`input` 作用于 debounce 后文本）。任一插件的 `editor.transform` 返回错误时，宿主 MUST 跳过它、沿用上一步文本（**不丢用户输入**）；前端只在源码模式接 `input` 相位并保守替换缓冲（§3.7）。
+- **编辑器**（0.4 阶段 4 落地）：`contributes.editor` → `editor.transform` 方法（`before-save` 作用于 body，`input` 作用于 debounce 后文本）。任一插件的 `editor.transform` 返回错误时，宿主 MUST 跳过它、沿用上一步文本（**不丢用户输入**）；前端在源码与实时预览两模式都接 `input` 相位并保守替换缓冲（§3.7）。
 
 后置（本版不实现，预留方法名）：`render_fence`（自定义代码块渲染）、`import`/`export`。
 
@@ -634,7 +634,7 @@ provider = { type = "select", options = ["claude", "openai"], default = "claude"
 阶段 4 = 落地两处**早已在规范里、此前未实现**的契约，均向后兼容、不升 apiVersion（`editor.transform`/`contributes.editor` 自 0.1/0.2 起就在 §3.7/§6.5/§8；widget 词汇扩充是前端渲染契约，未知 type 前端安全忽略）。
 
 1. **编辑期钩子** `contributes.editor` → `editor.transform`（§3.7/§6.5/§8）：编辑期把编辑缓冲文本交给 wasm 改写。宿主端点 `POST /api/plugins/{id}/editor/transform`（§9.5），纯文本 in/out、无 notes/ai 上下文（走无上下文 `dispatch`，防写入重入）；任一插件失败即跳过（不丢用户输入）。SDK 加 `editor` 槽（`register! { editor: fn(&str,String)->Result<String> }`）。
-2. **前端仅源码模式接 `input` 相位**（实现说明）：CodeMirror debounce 输入停顿后依次调声明插件、保守替换缓冲——仅在**真实用户输入**（打字/删除/粘贴）后触发（排除程序化 dispatch/外部同步，天然防环），等待期间用户又敲字则丢弃变换（不覆盖新输入）。富文本模式不接（整篇重排风险高）；`before-save` 相位与 `command` 复用后置（现有服务端 `hook.before_save` 已覆盖保存前改写）。
+2. **前端两个模式都接 `input` 相位**（实现说明）：单个 CodeMirror 6 实例的源码与实时预览同一缓冲，debounce 输入停顿后依次调声明插件、保守替换缓冲——仅在**真实用户输入**（打字/删除/粘贴）后触发（排除程序化 dispatch/外部同步，天然防环），等待期间用户又敲字则丢弃变换（不覆盖新输入）；`before-save` 相位与 `command` 复用后置（现有服务端 `hook.before_save` 已覆盖保存前改写）。
 3. **widget 词汇扩充**（§9.2）：补齐设计文档 §7.2 早列入的 `checkbox`/`select`（独立交互控件）+ 布局原语 `divider`/`heading`。新增 widget 只在前端渲染层，服务端 `ui`/`reply` 仍原样透传；其可本地化文本字段遵循 §9.2.1。
 
 ```

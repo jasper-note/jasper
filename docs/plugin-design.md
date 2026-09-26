@@ -182,7 +182,7 @@ auto_approve_write = { type = "bool", default = false, label = "AI 改笔记免�
 ### 5.3 用例 C — 编辑插件
 - **保存前格式化** → 后端钩子 `on-before-save(note) -> note`，注入 `api.rs::update_note`/`create_note` 在 `serialize::*` 之前。干净、可沙箱，**优先**。
 - **回显边界**（2026-07-02 落地时确认）：改写只体现在 API 响应与磁盘上；`NoteView` 保存后**不回填**编辑器缓冲（自动保存频繁，回填跳光标）。切走再切回笔记即可见。若将来要「保存后立即回显」，做保守版：仅当响应正文 ≠ 提交值**且此后无新输入**时替换缓冲。
-- **输入时检测** → 前端编辑器(CodeMirror/Milkdown)对 debounce 后的输入调一次后端 WASI 变换（`editor.on=input`），结果回填。**不放前端任意 JS**，仍走封装能力。完全实时的复杂交互暂不支持。
+- **输入时检测** → 前端编辑器（CodeMirror 6 的两种模式：源码 / 实时预览）对 debounce 后的输入调一次后端 WASI 变换（`editor.on=input`），结果回填。**不放前端任意 JS**，仍走封装能力。完全实时的复杂交互暂不支持。
 
 ## 6. 后端 WASI 层（wasmi, Rust-only）
 
@@ -284,7 +284,7 @@ feature off：路由不存在，但 SPA fallback 会对 `/api/plugins` 回 200 �
 1. **阶段 1 — 主题**：CSS 令牌化重构（补全令牌 + `data-theme` + 文档化）+ 声明式主题加载。零运行时，先做。✅ 已落地（2026-06-30）。
 2. **阶段 2 — 后端骨架 + 存储扩展点**（进行中，2026-07-02 扩容）：`plugin-sdk` + wasmi 加载器 + zip 安装(本地) + `on-before-save` 钩子 + 示例格式化插件；加上 `[[contributes.storage]]` + `host:http` + `PluginStorage` 适配 + WebDAV-as-plugin 参考实现；前端插件管理面板 + 向导动态数据源表单（SchemaForm）。跑通 = 后端路线 + 存储路线都成立。
 3. **阶段 3 — 受控能力 + widget 宿主**：`host:ai`/`notes:*` + 内置 `chat`/`form` widget + server-driven UI + commands/ui 端点 → **AI 插件端到端**。UI 去静态化。✅ 已落地（2026-07-02，spec 升 0.3）：notes:read/write（写=提案回传+宿主托管免确认）、host:ai（genai 库，anthropic/openai 兼容 + 自定义 base_url）、六 widget 渲染器 + 右侧 dock 侧栏、ui/auto-approve/ai-config 端点。官方 ai-chat 插件（jasper-plugins 仓库）与 SDK 0.3 crates.io 发版为后续。
-4. **阶段 4 — 编辑钩子 + 扩词汇表**：输入时检测 + 更多 widget。✅ 已落地（2026-07-04，apiVersion 不变仍 0.4——落地既有契约）：`contributes.editor` → `editor.transform`（纯文本 in/out、无 notes/ai 上下文，端点 `POST /api/plugins/{id}/editor/transform`）+ SDK `editor` 槽 + 前端**仅源码编辑器**接 `input` 相位（CodeMirror debounce → 保守替换缓冲，仅真实用户输入触发、天然防环、陈旧则丢弃）；widget 词汇补齐 `checkbox`/`select`/`divider`/`heading`（UiWidget 渲染器）。`before-save` 相位 + `command` 复用 + 富文本接入后置（现有服务端 `on-before-save` 钩子已覆盖保存前改写）。细节见 spec §12.4。（远程 URI / 市场此前已在「插件生态 + 市场」阶段落地）
+4. **阶段 4 — 编辑钩子 + 扩词汇表**：输入时检测 + 更多 widget。✅ 已落地（2026-07-04，apiVersion 不变仍 0.4——落地既有契约）：`contributes.editor` → `editor.transform`（纯文本 in/out、无 notes/ai 上下文，端点 `POST /api/plugins/{id}/editor/transform`）+ SDK `editor` 槽 + 前端**单个 CodeMirror 6 实例的源码与实时预览两模式**接 `input` 相位（debounce → 保守替换缓冲，仅真实用户输入触发、天然防环、陈旧则丢弃）；widget 词汇补齐 `checkbox`/`select`/`divider`/`heading`（UiWidget 渲染器）。`before-save` 相位 + `command` 复用后置（现有服务端 `on-before-save` 钩子已覆盖保存前改写）。细节见 spec §12.4。（远程 URI / 市场此前已在「插件生态 + 市场」阶段落地）
 
 ## 12. 决策记录
 **已定**：wasmi / JSON ABI / Rust-only 后端 / 无任意 JS（走 widget 词汇表）/ AI 写笔记默认确认可关 / zip 打包**仅本地加载**（市场后置）/ `host:fetch` 暂不做 / feature-gate / **令牌两层（基础调色板 ← 语义层，已落地）**。
@@ -297,7 +297,7 @@ feature off：路由不存在，但 SPA fallback 会对 `/api/plugins` 回 200 �
 
 **0.3 追加已定**（2026-07-02）：写确认=提案回传、免确认宿主托管、ai.complete 走 genai（宿主级 provider/base_url/key/model）、notes/ai 仅 command/ui 上下文、sidebar 扩 command/view、widget 事件契约冻结——细节见 spec §12.2。
 
-**0.4 阶段 4 追加已定**（2026-07-04，apiVersion 不变）：`contributes.editor`/`editor.transform` 编辑期钩子落地（纯文本 in/out、无 notes/ai 上下文、前端仅源码模式接 input 相位并保守替换缓冲）；SDK 加 `editor` 槽；widget 词汇补齐 checkbox/select/divider/heading。均为「落地既有契约 + 前端渲染层扩充」，向后兼容不升 apiVersion——细节见 spec §12.4。
+**0.4 阶段 4 追加已定**（2026-07-04，apiVersion 不变）：`contributes.editor`/`editor.transform` 编辑期钩子落地（纯文本 in/out、无 notes/ai 上下文、前端接 input 相位并保守替换缓冲——0.4 落地时仅源码模式，编辑器统一到 CodeMirror 6 后两模式（源码/实时预览）都接）；SDK 加 `editor` 槽；widget 词汇补齐 checkbox/select/divider/heading。均为「落地既有契约 + 前端渲染层扩充」，向后兼容不升 apiVersion——细节见 spec §12.4。
 
 **仍待定（不阻塞，到对应阶段再定）**：
 - [ ] 按钮“显示图标 / 文字 / 两者”是否在设置页给用户开关（store `ui.svelte.ts` 已就绪，差一个 UI）。

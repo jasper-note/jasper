@@ -95,7 +95,7 @@ resources()     -> String   // resource_usage 求 used_by
 
 ### 4.4 资源 blob 路径（唯一非自明的 UI 改动）
 
-- `:/id` → 显示 URL 的改写**一点集约**在 `api.resourceUrl(id)`（`render.ts:71`、`WysiwygEditor.svelte:56`、`ResourcePanel.svelte`）。
+- `:/id` → 显示 URL 的改写**一点集约**在 `api.resourceUrl(id)`（`render.ts:71`（阅读视图）、`editor/livePreview.ts` + `editor/widgets.ts`（实时预览）、`ResourcePanel.svelte`）。
 - 浏览器构建里 `resourceUrl(id)` 改为**返回 blob URL**。因 `resourceUrl` 目前是**同步**签名，方案：启动/上传时把 `resources` store 的 `Blob` 用 `URL.createObjectURL` 建成 `Map<id, objectURL>`，`resourceUrl` 同步查表；卸载/删除时 `revokeObjectURL`。
 - 上传 `uploadResource(file, filename)`：前端算 id（`new_id`）、存 `Blob` 进 `resources`、调 WASM `upsert_resource_meta` 生成元数据 `.md`、更新 blob URL 表，返回与 server 版同形的 `{ id, markdown, ... }`。
 

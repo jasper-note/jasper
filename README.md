@@ -26,9 +26,9 @@ A lightweight, **read-write** [Joplin](https://joplinapp.org/)-compatible client
 - Create a brand-new library, or connect to an existing one — chosen in a first-run setup wizard. Switch data source at any time from ⚙.
 
 ### ✍️ Editing
-- **Two editor modes, one click apart** (like Joplin): a **Markdown source** editor (CodeMirror 6) and a **WYSIWYG** rich editor (Milkdown / Crepe). Source is the default; flip to WYSIWYG from the toolbar and your choice is remembered. Both are lazy-loaded — neither bloats first paint.
-- **Autosave** while you type; create / update / delete notes. Opening or switching to WYSIWYG never auto-saves on its own — only your edits do. **Cmd/Ctrl+S** saves the current note on the spot (no browser "Save page" dialog).
-- Source mode preserves bytes exactly; WYSIWYG reformats the whole note's Markdown on save (an inherent round-trip trade-off) but keeps Joplin `:/id` resource links intact. HTML notes always use source mode.
+- **Two views, one editor, one click apart**: a **Live preview** (Obsidian-style — syntax reveals itself around the cursor while images, PDFs, tables and math render in place) and plain **Markdown source**. It is the same CodeMirror 6 instance either way, so switching views never rebuilds or reformats your note. Live preview is the default; your choice is remembered, and the editor chunk is lazy-loaded.
+- **Autosave** while you type; create / update / delete notes. Opening a note never writes anything by itself — only your edits do. **Cmd/Ctrl+S** saves the current note on the spot (no browser "Save page" dialog).
+- Your Markdown is kept **byte-for-byte**: neither view reformats it on open or save — reformatting happens only when you run the toolbar's format command. HTML notes always open in source view.
 - Write-back preserves every metadata field verbatim and only refreshes the timestamps — minimal diff, friendly to Joplin's conflict handling.
 
 ### 🎨 Rich Markdown rendering

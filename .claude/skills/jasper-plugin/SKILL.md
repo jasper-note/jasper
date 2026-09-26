@@ -100,11 +100,11 @@ sdk::register! { before_save: before_save, command: command, ui: ui, editor: edi
 
 8. **storage 插件必须返回真实 mtime**：`list_items` 的 `ItemStat.updated_time` 决定增量缓存；返回 0 合法但会导致每次全量拉取。WebDAV 从 `getlastmodified`、S3 从 `LastModified` 取。
 
-9. **命令改写不回显编辑器**（before-save 也一样，除 note-toolbar command 外）：见 CLAUDE.md「before-save 改写不回显」——改写落 API 响应与磁盘，源码模式切走再切回才见。而 `note-toolbar` command 的 `result.body` 会替换编辑缓冲（spec §9.4），这是例外。
+9. **命令改写不回显编辑器**（before-save 也一样，除 note-toolbar command 外）：见 CLAUDE.md「before-save 改写不回显」——改写落 API 响应与磁盘，切走再切回笔记才见。而 `note-toolbar` command 的 `result.body` 会替换编辑缓冲（spec §9.4），这是例外。
 
 ## note-toolbar 命令约定（spec §9.4）
 
-宿主以 `args = { note_id, title, body }`（当前编辑器内容）调用 `command`；若返回 `result` 含字符串字段 `body`，宿主用它替换编辑缓冲并走自动保存。命令按 Normal 档限额（网络等待经 host_call 豁免 CPU 墙钟）。前端按钮**仅源码模式**出现。
+宿主以 `args = { note_id, title, body }`（当前编辑器内容）调用 `command`；若返回 `result` 含字符串字段 `body`，宿主用它替换编辑缓冲并走自动保存。命令按 Normal 档限额（网络等待经 host_call 豁免 CPU 墙钟）。前端按钮在编辑态工具栏出现（源码 / 实时预览均可）。
 
 ## 测试配方（四层，全在 CI 跑）
 

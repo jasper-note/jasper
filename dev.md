@@ -39,7 +39,7 @@ cd core && cargo test
 cd server && cargo test
 
 # 2) Frontend unit tests (Vitest + jsdom): render, i18n, api helpers,
-#    and the image-block alt round-trip (web/src/lib/milkdown/imageBlockAlt.test.ts)
+#    and the editor's markdown helpers (web/src/lib/editor/markdown.test.ts)
 cd web && pnpm test
 cd web && pnpm check         # type-check (also covers *.test.ts)
 
@@ -55,7 +55,12 @@ The e2e harness lives in `web/e2e/`: `make-fixture.mjs` writes a tiny Joplin
 library (a notebook, a note with an image, a to-do, a resource), `server.mjs`
 is the Playwright `webServer` launcher (fresh temp data + isolated
 `JASPER_CONFIG_DIR` each run), and the `*.spec.ts` files cover load/search,
-rendering, editing + write-back, and the WYSIWYG image-`alt` regression.
+read-view rendering (`smoke.spec.ts`), and the editor. Editing goes through a
+single CodeMirror 6 instance with two modes — `source` and `live` preview
+(default) — over one buffer that is saved byte-exact (opening or saving never
+reformats the markdown): `edit.spec.ts` (a source-mode edit persists),
+`editor-hook.spec.ts` (an `input`-phase plugin rewrites the buffer),
+`autosave-race.spec.ts`, and `save-shortcut.spec.ts`.
 
 ## Single binary
 
@@ -180,7 +185,7 @@ cd core && cargo test
 cd server && cargo test
 
 # 2) 前端单元测试（Vitest + jsdom）：渲染、i18n、api 助手，
-#    以及图片块 alt 往返（web/src/lib/milkdown/imageBlockAlt.test.ts）
+#    以及编辑器的 markdown 助手（web/src/lib/editor/markdown.test.ts）
 cd web && pnpm test
 cd web && pnpm check         # 类型检查（也覆盖 *.test.ts）
 
@@ -195,7 +200,11 @@ cd web && pnpm e2e
 e2e 相关代码在 `web/e2e/`：`make-fixture.mjs` 写出一个最小 Joplin 库（一个笔记本、
 一篇带图笔记、一条待办、一个资源）；`server.mjs` 是 Playwright 的 `webServer`
 启动器（每次重建临时数据 + 隔离的 `JASPER_CONFIG_DIR`）；各 `*.spec.ts` 覆盖
-加载/搜索、渲染、编辑写回，以及富文本图片 `alt` 回归。
+加载/搜索、阅读视图渲染（`smoke.spec.ts`）与编辑器。编辑器是单个 CodeMirror 6
+实例、两种模式（`source` 源码 / `live` 实时预览，默认后者），共用一份缓冲、保存
+逐字节一致（打开与保存都不重排 markdown）：`edit.spec.ts`（源码模式编辑落盘）、
+`editor-hook.spec.ts`（`input` 相位插件改写缓冲）、`autosave-race.spec.ts`、
+`save-shortcut.spec.ts`。
 
 ## 单文件打包
 

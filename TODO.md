@@ -37,9 +37,9 @@
 - **编辑期钩子** `contributes.editor` → `editor.transform`（spec §3.7/§6.5/§8）：
   - 后端：`server/src/plugins/manifest.rs` 解析/校验 `[[contributes.editor]]{on}`（`on`∈before-save|input、需 `[backend]`、相位不重复）+ `WIDGET_TYPES`/`EDITOR_PHASES` 常量；`host.rs::has_editor_transform` 守卫；`routes.rs` 挂 `POST /api/plugins/{id}/editor/transform {phase,text}→{text}`（非法相位 400、未声明/禁用 404、只读拦截）——**纯文本 in/out，走无 notes/ai 上下文的 `dispatch`**（防写入重入），任一插件失败即跳过（不丢输入）。
   - SDK：`register!` 增 `editor` 槽（`fn(&str /*phase*/, String /*text*/)->Result<String,PluginError>`，处理 `editor.transform` 方法）。
-  - 前端：`api.ts::editorTransform`、`plugins.svelte.ts::editorInputPlugins`；**仅源码编辑器**（`Editor.svelte`）接 `input` 相位——CodeMirror debounce 输入停顿后依次调声明插件、保守替换缓冲（仅真实用户输入触发、程序化 dispatch 不触发故天然防环、等待期间用户又敲字则丢弃变换）。富文本不接（整篇重排风险高）。
+  - 前端：`api.ts::editorTransform`、`plugins.svelte.ts::editorInputPlugins`；单个 CodeMirror 6 实例（`CodeMirrorEditor.svelte`）在**源码与实时预览两个模式下都接** `input` 相位——700 ms debounce 输入停顿后依次调声明插件、保守替换缓冲（**仅真实用户输入**（`tr.isUserEvent('input'|'delete')`）触发、程序化整篇替换不触发故天然防环、等待期间用户又敲字则丢弃变换）。
   - 测试：`manifest`（parses_and_validates_editor_contribution）/`routes`（editor_transform_end_to_end 全链路）Rust 单测 + testbed 夹具 `editor.transform`（标相位+全大写）；`api`/`plugins`/`UiWidget` 前端单测。
-  - **后置**：`before-save` 相位前端接入、spec §3.7 可选 `command` 复用、富文本模式接入（现有服务端 `hook.before_save` 已覆盖保存前改写场景）。
+  - **后置**：`before-save` 相位前端接入、spec §3.7 可选 `command` 复用（现有服务端 `hook.before_save` 已覆盖保存前改写场景）。
 - **扩展 widget 词汇表**：`UiWidget.svelte` 从 6 种扩到 10 种——补齐设计文档 §7.2 早列入的 `checkbox`/`select`（独立交互控件）+ 布局原语 `divider`/`heading`；`WIDGET_TYPES` 同步。文本字段（label / option label / heading text）遵循 §9.2.1 locale map。
 
 > 注：`docs/plugin-design.md` §11 原文括注"远程 URI / 市场后置"，但插件市场（`market.ts`/`market.svelte.ts` + registry 仓库）已在「插件生态 + 市场」阶段完成，此处该括注已过时，不算未完成项。
@@ -50,4 +50,4 @@
 
 ---
 
-已完成的功能不在此列，完整列表见 `CLAUDE.md`「路线 / TODO」节顶部的"已完成"部分（本地+WebDAV 读写、增量缓存、资源管理、单文件打包、GHCR 发布、多语言、WYSIWYG 编辑器、拖拽移动、只读模式、插件系统阶段 1-3 + 市场、SSE 自动刷新等）。
+已完成的功能不在此列，完整列表见 `CLAUDE.md`「路线 / TODO」节顶部的"已完成"部分（本地+WebDAV 读写、增量缓存、资源管理、单文件打包、GHCR 发布、多语言、CodeMirror 6 编辑器（源码 / 实时预览）、拖拽移动、只读模式、插件系统阶段 1-3 + 市场、SSE 自动刷新等）。
