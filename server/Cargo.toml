@@ -1,6 +1,6 @@
 [package]
 name = "jasper"
-version = "2026.9.21"
+version = "2026.9.26"
 edition = "2021"
 description = "Lightweight read-only Joplin client — local HTTP server + browser UI"
 license = "AGPL-3.0-or-later"
