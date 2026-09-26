@@ -113,6 +113,17 @@
     }
   }
 
+  // Cmd/Ctrl+S：App 的 window 监听拦下浏览器的「保存网页」后调这里——不等防抖，立即冲刷未保存改动。
+  // 无改动时给一次「已保存」反馈，否则按键毫无回应（保存态在编辑态工具栏里显示）。
+  export function saveNow() {
+    if (!detail || readOnly) return
+    if (autosave.dirty) {
+      if (!autosave.saving) void save() // 在途保存返回时会自行续排下一次，无需并发
+    } else {
+      saveState = 'saved'
+    }
+  }
+
   function onBodyChange(v: string) {
     body = v
     if (applyingExternal) return // 程序化写入（外部同步）不排自动保存

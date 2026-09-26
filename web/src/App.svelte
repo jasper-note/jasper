@@ -36,6 +36,7 @@
   import { loadPlugins, pluginsAvailable, sidebarContributions, type SidebarEntry } from './lib/plugins.svelte'
   import { installSelectionCapture, clearSelection } from './lib/selection.svelte'
   import { connectEvents, type ChangeEvent } from './lib/events'
+  import { isSaveShortcut } from './lib/saveShortcut'
 
   // 让 <html lang> 跟随当前语言（影响断词/无障碍等），并把当前语言持久化到服务端
   // （启动 + 每次切换）——插件经 host_call system.locale 读「系统语言」用同一值。
@@ -58,6 +59,14 @@
   let detail = $state<NoteDetail | null>(null)
   // NoteView 组件实例（bind:this）：SSE 外部变更经 applyExternal 保守回显
   let noteView = $state<ReturnType<typeof NoteView> | null>(null)
+
+  // Cmd/Ctrl+S 在浏览器里默认是「保存网页」（另存为对话框）——全页拦下默认行为，任何界面
+  // 都不再弹它；有笔记打开时交给 NoteView.saveNow 立即冲刷未保存改动（内部自带「有改动才存」判断）。
+  function onSaveShortcut(e: KeyboardEvent) {
+    if (!isSaveShortcut(e)) return
+    e.preventDefault()
+    noteView?.saveNow()
+  }
 
   let query = $state('')
   let searchMode = $state(false)
@@ -777,6 +786,8 @@
     }, 200)
   }
 </script>
+
+<svelte:window onkeydown={onSaveShortcut} />
 
 <div class="app">
   <header class="topbar">
