@@ -1,8 +1,9 @@
 <script lang="ts">
   // 通用设置分区渲染器：由服务器下发的 SettingsSection 描述符驱动，无需为每个分区写专用组件。
   // 按 field.type 渲染（text/secret/multiline/number/bool/enum/notebook-multiselect/theme/language/
-  // provider-config），show_if 条件显隐，options_source 动态选项，actions 按 config-result/status
-  // 约定提交 + on_success（reload/relogin/saved）。纯逻辑在 settingsSchema.ts（可单测）。
+  // provider-config，及展示型 copy/note/chips），show_if 条件显隐，options_source 动态选项，
+  // actions 按 config-result/status 约定提交 + on_success（reload/relogin/saved/reload-section）；
+  // 带 field 的动作挂在该字段下，带 confirm_key 的先确认。纯逻辑在 settingsSchema.ts（可单测）。
   import { onMount } from 'svelte'
   import { api, getAuthToken, type FolderNode } from './api'
   import { t, getLocale, setLocale, availableLocales, localeName } from './i18n.svelte'
@@ -16,6 +17,9 @@
     evalShowIf,
     resolveLabel,
     fillPlaceholders,
+    maskSecrets,
+    actionsFor,
+    chipGroups,
     buildRequestBody,
     interpretResult,
     readClientValue,
@@ -164,6 +168,7 @@
   }
 
   async function runAction(action: SettingsAction) {
+    if (action.confirm_key && !confirm(resolveLabel(action.confirm_key))) return
     error = ''
     formErrors = {}
     let submitValues = values
@@ -241,6 +246,18 @@
   function displayText(f: SettingsField): string {
     return fillPlaceholders(String(values[f.key] ?? ''), window.location.origin, getAuthToken())
   }
+
+  // 带 mask 的 copy 字段：默认把密钥显示成圆点，点眼睛图标切换（按字段 key 记）。
+  // 会话 token 也一并遮住——没配 MCP key 时它会被填进命令里。
+  let revealed = $state<Record<string, boolean>>({})
+  function maskedText(f: SettingsField): string {
+    const text = displayText(f)
+    if (!f.mask) return text
+    return maskSecrets(text, [String(values[f.mask] ?? ''), getAuthToken()])
+  }
+  // 文本里确有密钥可遮时才显示眼睛图标
+  const canMask = (f: SettingsField) => maskedText(f) !== displayText(f)
+  const shownText = (f: SettingsField) => (revealed[f.key] ? displayText(f) : maskedText(f))
 
   // 复制成功的字段 key（图标短暂变对勾）。
   let copiedKey = $state<string | null>(null)
@@ -330,22 +347,53 @@
       {:else if f.type === 'copy'}
         <div class="field">
           {#if f.label_key}<span class="field-label">{resolveLabel(f.label_key)}</span>{/if}
-          <div class="copy-row">
-            <input class="copy-input" readonly value={displayText(f)} onfocus={(e) => e.currentTarget.select()} />
-            <Button
-              variant="ghost"
-              iconOnly
-              icon={copiedKey === f.key ? 'check' : 'braces'}
-              label={t('common.copy')}
-              onclick={() => copyField(f)}
-            />
-          </div>
+          {#if displayText(f)}
+            <!-- 代码块而非单行输入框：长命令自动换行，能看全；点一下文本即全选 -->
+            <div class="code-box">
+              <code class="code-text">{shownText(f)}</code>
+              <span class="code-tools">
+                {#if canMask(f)}
+                  <Button
+                    variant="ghost"
+                    iconOnly
+                    icon={revealed[f.key] ? 'eye-off' : 'eye'}
+                    label={revealed[f.key] ? t('common.hide') : t('common.show')}
+                    onclick={() => (revealed[f.key] = !revealed[f.key])}
+                  />
+                {/if}
+                <Button
+                  variant="ghost"
+                  iconOnly
+                  icon={copiedKey === f.key ? 'check' : 'copy'}
+                  label={copiedKey === f.key ? t('common.copied') : t('common.copy')}
+                  onclick={() => copyField(f)}
+                />
+              </span>
+            </div>
+          {:else if f.empty_key}
+            <p class="empty-text">{resolveLabel(f.empty_key)}</p>
+          {/if}
           {#if f.desc_key}<p class="tip">{resolveLabel(f.desc_key)}</p>{/if}
         </div>
       {:else if f.type === 'note'}
         <div class="field">
           {#if f.label_key}<span class="field-label">{resolveLabel(f.label_key)}</span>{/if}
           <p class="note-text">{displayText(f)}</p>
+          {#if f.desc_key}<p class="tip">{resolveLabel(f.desc_key)}</p>{/if}
+        </div>
+      {:else if f.type === 'chips'}
+        <div class="field">
+          {#if f.label_key}<span class="field-label">{resolveLabel(f.label_key)}</span>{/if}
+          {#each chipGroups(values[f.key]) as g (g.label_key)}
+            <div class="chip-group">
+              <span class="chip-group-label" class:danger={g.tone === 'danger'}>{resolveLabel(g.label_key)}</span>
+              <span class="chips">
+                {#each g.items as item (item)}
+                  <code class="chip" class:danger={g.tone === 'danger'}>{item}</code>
+                {/each}
+              </span>
+            </div>
+          {/each}
           {#if f.desc_key}<p class="tip">{resolveLabel(f.desc_key)}</p>{/if}
         </div>
       {:else if f.type === 'multiline'}
@@ -372,6 +420,14 @@
           {#if f.desc_key}<p class="tip">{resolveLabel(f.desc_key)}</p>{/if}
         </label>
       {/if}
+      <!-- 挂在本字段下的动作（如 API Key 的生成/重新生成/清除），紧贴它操作的对象 -->
+      {#if actionsFor(section.actions, f.key).some((a) => evalShowIf(a.show_if, values))}
+        <div class="field-actions">
+          {#each actionsFor(section.actions, f.key) as action (action.id)}
+            {#if evalShowIf(action.show_if, values)}{@render actionButton(action)}{/if}
+          {/each}
+        </div>
+      {/if}
     {/if}
   {/each}
 
@@ -379,40 +435,106 @@
     <div class="error"><Icon name="alert" size={14} /> {error}</div>
   {/if}
 
-  {#if section.actions?.length}
+  {#if actionsFor(section.actions).length}
     <div class="actions">
       {#if saved}<span class="saved">{t('note.saved')}</span>{/if}
-      {#each section.actions as action (action.id)}
-        {#if evalShowIf(action.show_if, values)}
-          <Button
-            variant={action.variant ?? 'default'}
-            label={saving && action.variant === 'primary' ? t('settings.connecting') : resolveLabel(action.label_key)}
-            onclick={() => runAction(action)}
-            disabled={saving || (action.variant === 'primary' && prefillMissing)}
-          />
-        {/if}
+      {#each actionsFor(section.actions) as action (action.id)}
+        {#if evalShowIf(action.show_if, values)}{@render actionButton(action)}{/if}
       {/each}
     </div>
   {/if}
 </div>
 
+{#snippet actionButton(action: SettingsAction)}
+  <Button
+    variant={action.variant ?? 'default'}
+    icon={action.icon}
+    label={saving && action.variant === 'primary' ? t('settings.connecting') : resolveLabel(action.label_key)}
+    onclick={() => runAction(action)}
+    disabled={saving || (action.variant === 'primary' && prefillMissing)}
+  />
+{/snippet}
+
 <style>
   .section {
     max-width: 520px;
   }
-  /* 展示型字段（copy/note）：只读，视觉上与可编辑输入拉开距离 */
-  .copy-row {
+  /* 展示型字段（copy/note/chips）：只读，视觉上与可编辑输入拉开距离 */
+  .code-box {
     display: flex;
-    align-items: center;
-    gap: 4px;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 7px 6px 7px 10px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--hover);
   }
-  .copy-input {
+  .code-text {
     flex: 1 1 auto;
     min-width: 0;
+    padding-top: 3px;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 12px;
-    background: var(--hover);
-    cursor: text;
+    line-height: 1.55;
+    color: var(--text);
+    /* 长命令/长密钥整段换行显示，不截断；点一下即全选，方便手动复制 */
+    white-space: pre-wrap;
+    word-break: break-all;
+    user-select: all;
+  }
+  .code-tools {
+    display: inline-flex;
+    flex: 0 0 auto;
+    gap: 2px;
+  }
+  .empty-text {
+    margin: 0;
+    padding: 8px 10px;
+    border: 1px dashed var(--border);
+    border-radius: 7px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-dim);
+  }
+  .field-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .chip-group {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin-top: 6px;
+  }
+  .chip-group-label {
+    flex: 0 0 64px;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .chip-group-label.danger {
+    color: var(--danger);
+  }
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .chip {
+    padding: 2px 7px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--bg-side);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--text);
+  }
+  .chip.danger {
+    border-color: var(--danger);
+    background: var(--danger-soft);
+    color: var(--danger);
   }
   .note-text {
     margin: 0;

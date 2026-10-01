@@ -876,26 +876,40 @@ async fn settings_schema(State(state): State<Arc<AppState>>) -> Json<serde_json:
         } else {
             format!(" --header \"Authorization: Bearer {api_key}\"")
         };
+        // 工具按只读 / 写入 / 删除分组展示，删除组标成危险色
+        let tool_groups: Vec<serde_json::Value> = crate::mcp::tool_groups()
+            .into_iter()
+            .map(|(group, items)| {
+                let (label_key, tone) = match group {
+                    "read" => ("settings.mcp.toolsRead", "default"),
+                    "destructive" => ("settings.mcp.toolsDestructive", "danger"),
+                    _ => ("settings.mcp.toolsWrite", "default"),
+                };
+                json!({ "label_key": label_key, "tone": tone, "items": items })
+            })
+            .collect();
         sections.push(json!({
             "id": "mcp",
             "title_key": "settings.section.mcp",
             "icon": "plug",
             "scope": "server",
             "desc_key": "settings.mcp.desc",
-            "search_keys": ["settings.mcp.enabled", "settings.mcp.endpoint", "settings.mcp.command"],
+            "search_keys": ["settings.mcp.enabled", "settings.mcp.endpoint", "settings.mcp.apiKey",
+                            "settings.mcp.command"],
             "fields": [
                 { "key": "enabled", "type": "bool", "label_key": "settings.mcp.enabled",
                   "desc_key": "settings.mcp.enabledDesc" },
                 { "key": "endpoint", "type": "copy", "label_key": "settings.mcp.endpoint",
                   "show_if": shown_if_on },
-                // key 本身：设了才显示（`api_key_set` 是 values 里的只读标记）
+                // key 本身：默认遮住（mask），没设时显示空态说明；生成/重新生成/清除挂在它下面
                 { "key": "api_key", "type": "copy", "label_key": "settings.mcp.apiKey",
-                  "desc_key": "settings.mcp.apiKeyDesc",
-                  "show_if": { "field": "api_key_set", "truthy": true } },
+                  "desc_key": "settings.mcp.apiKeyDesc", "empty_key": "settings.mcp.apiKeyEmpty",
+                  "mask": "api_key", "show_if": shown_if_on },
+                // 命令里同样含 key，一并遮住
                 { "key": "command", "type": "copy", "label_key": "settings.mcp.command",
-                  "desc_key": "settings.mcp.commandDesc", "show_if": shown_if_on },
-                { "key": "tools", "type": "note", "label_key": "settings.mcp.tools",
-                  "show_if": shown_if_on }
+                  "desc_key": "settings.mcp.commandDesc", "mask": "api_key", "show_if": shown_if_on },
+                { "key": "tools", "type": "chips", "label_key": "settings.mcp.tools",
+                  "desc_key": "settings.mcp.toolsDesc", "show_if": shown_if_on }
             ],
             "values": {
                 "enabled": enabled,
@@ -903,25 +917,28 @@ async fn settings_schema(State(state): State<Arc<AppState>>) -> Json<serde_json:
                 "api_key": api_key,
                 "api_key_set": !api_key.is_empty(),
                 "command": format!("claude mcp add --transport http jasper {{origin}}{MCP_PATH}{header_part}"),
-                "tools": crate::mcp::TOOL_NAMES.join("、")
+                "tools": tool_groups
             },
             "actions": [
                 { "id": "save", "label_key": "settings.mcp.save", "variant": "primary",
                   "request": { "method": "PUT", "url": "/api/mcp/config", "convention": "status" },
                   "on_success": "saved" },
                 // 生成/轮换：只发动作，不带字段值（免得顺手把开关也改了）。
-                // 未设 key 时叫「生成」、已设时叫「重新生成」——同一个请求，两种措辞。
-                { "id": "generate", "label_key": "settings.mcp.generate",
+                // 未设 key 时叫「生成」、已设时叫「重新生成」——同一个请求，两种措辞；
+                // 后者与「清除」会让正在用的 key 立即失效，先确认。
+                { "id": "generate", "label_key": "settings.mcp.generate", "field": "api_key", "icon": "plus",
                   "request": { "method": "PUT", "url": "/api/mcp/config", "convention": "status",
                                "extra": { "regenerate_key": true } },
                   "submit": false, "on_success": "reload-section",
                   "show_if": { "field": "api_key_set", "truthy": false } },
-                { "id": "regenerate", "label_key": "settings.mcp.regenerate",
+                { "id": "regenerate", "label_key": "settings.mcp.regenerate", "field": "api_key",
+                  "icon": "refresh", "confirm_key": "settings.mcp.regenerateConfirm",
                   "request": { "method": "PUT", "url": "/api/mcp/config", "convention": "status",
                                "extra": { "regenerate_key": true } },
                   "submit": false, "on_success": "reload-section",
                   "show_if": { "field": "api_key_set", "truthy": true } },
                 { "id": "clear_key", "label_key": "settings.mcp.clearKey", "variant": "danger",
+                  "field": "api_key", "icon": "trash", "confirm_key": "settings.mcp.clearKeyConfirm",
                   "request": { "method": "PUT", "url": "/api/mcp/config", "convention": "status",
                                "extra": { "clear_key": true } },
                   "submit": false, "on_success": "reload-section",
@@ -2193,9 +2210,30 @@ mod tests {
         assert_eq!(endpoint, "{origin}/mcp");
         assert!(command.contains("{origin}/mcp") && command.contains("{header}"), "命令应留占位符: {command}");
         assert!(!command.contains("Bearer "), "没配 key 时服务端不该把 token 拼进命令");
-        let tools = mcp["values"]["tools"].as_str().unwrap();
-        assert!(tools.contains("search_notes") && tools.contains("delete_folder"), "工具清单: {tools}");
+        // 工具按只读 / 写入 / 删除分组，删除组标危险色
+        let tools = mcp["values"]["tools"].as_array().unwrap();
+        let group = |key: &str| tools.iter().find(|g| g["label_key"] == key).unwrap().clone();
+        let has = |g: &serde_json::Value, name: &str| g["items"].as_array().unwrap().iter().any(|t| t == name);
+        assert!(has(&group("settings.mcp.toolsRead"), "search_notes"));
+        assert!(has(&group("settings.mcp.toolsWrite"), "create_note"));
+        let destructive = group("settings.mcp.toolsDestructive");
+        assert_eq!(destructive["tone"], "danger");
+        assert!(has(&destructive, "delete_folder"));
         assert_eq!(mcp["actions"][0]["request"]["url"], "/api/mcp/config");
+        // API Key 字段开着就显示（没设时显示空态说明）、默认遮住；生成/重新生成/清除挂在它下面，
+        // 会让旧 key 失效的两个先确认
+        let fields = mcp["fields"].as_array().unwrap();
+        let api_key = fields.iter().find(|f| f["key"] == "api_key").unwrap();
+        assert_eq!(api_key["show_if"]["field"], "enabled");
+        assert_eq!(api_key["mask"], "api_key");
+        assert!(api_key["empty_key"].is_string());
+        let action = |id: &str| mcp["actions"].as_array().unwrap().iter().find(|a| a["id"] == id).unwrap().clone();
+        for id in ["generate", "regenerate", "clear_key"] {
+            assert_eq!(action(id)["field"], "api_key", "{id}");
+        }
+        assert!(action("generate").get("confirm_key").is_none());
+        assert!(action("regenerate")["confirm_key"].is_string());
+        assert!(action("clear_key")["confirm_key"].is_string());
 
         // 关掉 → 描述符回显 false（开关落 config.db）
         assert_eq!(
@@ -2281,6 +2319,50 @@ mod tests {
         assert_eq!(
             send(state.clone(), "PUT", "/api/mcp/config", r#"{"regenerate_key":true,"clear_key":true}"#, Some(&session2)).await.status(),
             StatusCode::BAD_REQUEST
+        );
+    }
+
+    /// 带指定 Host 发一次 MCP initialize（Streamable HTTP 要求 Accept 同时含 json 与 event-stream）。
+    #[cfg(feature = "mcp")]
+    async fn mcp_initialize(state: Arc<AppState>, host: &str, token: Option<&str>) -> Response {
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}"#;
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("host", host)
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        router(state).oneshot(builder.body(Body::from(body)).unwrap()).await.unwrap()
+    }
+
+    /// Host 检查只在没设 API key 时做：没设 key 只认本机地址（其余 403 并说明原因）；
+    /// 设了 key 后反代域名、局域网 IP 都能完成握手——这要求 rmcp 自带的 Host 检查已关掉，
+    /// 否则带着正确 key 也是 403（线上就踩过）。
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn mcp_host_check_applies_only_without_api_key() {
+        let state = state_with_auth(auth_config(None, false, "none", &[]));
+        for host in ["127.0.0.1:27583", "localhost"] {
+            assert_eq!(mcp_initialize(state.clone(), host, None).await.status(), StatusCode::OK, "{host}");
+        }
+        for host in ["jasper.example.com", "192.168.1.160:27583"] {
+            let resp = mcp_initialize(state.clone(), host, None).await;
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{host}");
+            assert_eq!(body_json(resp).await["error"], "mcp_host_not_allowed");
+        }
+
+        send(state.clone(), "PUT", "/api/mcp/config", r#"{"regenerate_key":true}"#, None).await;
+        let key = state.config.lock().unwrap().mcp_api_key();
+        for host in ["jasper.example.com", "192.168.1.160:27583", "127.0.0.1:27583"] {
+            assert_eq!(mcp_initialize(state.clone(), host, Some(&key)).await.status(), StatusCode::OK, "{host}");
+        }
+        // 设了 key 后不带 key 仍是 401，与 Host 无关
+        assert_eq!(
+            mcp_initialize(state, "jasper.example.com", None).await.status(),
+            StatusCode::UNAUTHORIZED
         );
     }
 

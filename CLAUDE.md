@@ -96,7 +96,8 @@ cd server && cargo build --release --features embed   # 产物 server/target/rel
 
 # MCP server（把笔记库暴露给 Claude Code 等客户端；默认构建不含，见 docs/mcp-server.md）
 cd server && cargo build --features mcp
-claude mcp add --transport http jasper http://127.0.0.1:27583/mcp   # 设了访问密码再加 Bearer 头
+claude mcp add --transport http jasper http://127.0.0.1:27583/mcp   # 设了访问密码再加 Bearer 头；
+# 从局域网 IP / 反代域名访问必须先在设置页生成 MCP API Key（没 key 只认本机 Host，见 docs/mcp-server.md「Host 检查」）
 
 # 本地起一个 WebDAV 服务端联调（hacdias/webdav，端口 8081，账号 joplin/joplin）
 docker compose -f docker-compose.dev.yml up -d
@@ -111,6 +112,7 @@ docker compose -f docker-compose.dev.yml down -v   # 用完清理（含数据卷
 - `JASPER_CONFIG_DIR`（配置库目录；默认平台配置目录 `jasper/config.db`）
 - `JASPER_WEB_DIR`（前端静态目录；默认相对源码，容器里指向打包路径）
 - `JASPER_READ_ONLY`（truthy=1/true/yes/on → 只读引导；仅当尚无保存配置时生效，之后以配置库为准）
+- `JASPER_MCP_ALLOWED_HOSTS`（仅 mcp 构建；没设 MCP API Key 时额外放行的 Host，逗号分隔，写了端口就连端口一起比，`*` 放行全部；设了 key 后不查 Host）
 - `RUST_LOG`（日志级别过滤，`tracing_subscriber::EnvFilter` 语法；不设时默认 `jasper=debug,tower_http=debug,info`——本项目内部与每条 HTTP 请求默认就是 debug 级可见，排障不用先设环境变量；调小用 `RUST_LOG=warn` 等）
 - 首次引导：`JASPER_SOURCE` / `JASPER_WEBDAV_USER` / `JASPER_WEBDAV_PASS`
 
@@ -245,7 +247,9 @@ GET/PUT /api/ai/config                 宿主级 AI 配置（0.3）{ provider, b
 /mcp                                   MCP server 端点（Streamable HTTP，rmcp）。JSON-RPC 全压这一个路径且
                                         一律 POST → **两道守卫都放行它**（否则只读时连 tools/list 都 403、
                                         匿名连工具都列不出），门控下沉到各工具：读工具按 Scope 过滤、
-                                        写工具查只读 + 要求 Access::Full。详见 docs/mcp-server.md
+                                        写工具查只读 + 要求 Access::Full。没设 MCP API Key 时只认本机 Host
+                                        （+ JASPER_MCP_ALLOWED_HOSTS），其余 403 mcp_host_not_allowed；
+                                        设了 key 不查 Host（rmcp 自带的 Host 检查已关）。详见 docs/mcp-server.md
 PUT    /api/mcp/config                 MCP 开关 + 独立 API key { enabled?, regenerate_key?, clear_key? }
                                         （普通 /api/* 写端点，**不**豁免守卫 → 匿名 401 / 只读 403；
                                         两个 key 动作同时传 → 400。设了 key 后 /mcp 只认它，会话 token 也不行）
@@ -304,7 +308,8 @@ PUT    /api/mcp/config                 MCP 开关 + 独立 API key { enabled?, r
 三层，均在 CI（`.github/workflows/ci.yml`：`rust-test` / `web-unit` / `e2e`）跑：
 - **Rust 单元**：`cd core && cargo test`（parser/serialize/library；`--features serde` 再跑一遍含 serde 往返）+ `cd plugin-sdk && cargo test`（ABI 信封/存储路由/register! ui 槽，native；`--features native-host` 再跑一遍含宿主替身：settings/http/notes 内存库/ai 预置回复）+ `cd server && cargo test`（config/storage/cache/webdav）**及** `cargo test --features mcp`（MCP 描述符下发模板不含 token / 端点豁免两道按方法的守卫 / 开关关掉后 503 /
 **独立 API key**：生成回显+拼命令、不带/带错/拿有效会话 token 均 401、revoke_all 后仍可用、重新生成使旧 key 失效、
-清除后回落、管理端点匿名 401 只读 403）
+清除后回落、管理端点匿名 401 只读 403 / **Host 检查**：没 key 本机 Host 握手 200、域名与局域网 IP 403，
+有 key 同样的 Host 握手 200；`strip_port`/`host_allowed`/`tool_groups` 单测在 mcp.rs）
 **及** `cargo test --features plugins`（manifest/zip 安装/能力门控/限额/before-save/命令链路/存储适配/**notes.* 提案与直写含跳钩子证明/ai.complete 双协议 stub/ui 端点与 pending_writes 全链路/editor.transform 编辑期钩子全链路含相位/守卫/只读分支**）。测试写在各 `.rs` 的 `#[cfg(test)] mod tests`。三类自动跳过（CI 安全）：`parser::parses_all_real_data` 缺 `JopinData/`；wasm 夹具测试缺 `plugins-examples/*/plugin.wasm`（先跑 `plugins-examples/build-wasm.sh`）；webdav 存储插件集成测试未设 `JASPER_TEST_WEBDAV_URL=http://127.0.0.1:8081/`（`docker compose -f docker-compose.dev.yml up -d` 起 hacdias/webdav）。s3/ai-polish 的插件行为测试在 jasper-plugins 仓库（MinIO 也在那边的 CI/compose 里）。
 - **前端单元**（`cd web && pnpm test`，Vitest + jsdom）：`src/**/*.test.ts` 与源码同目录。覆盖 `api`(parseResourceId/taskProgress)、`render`(markdown/`:/id`改写/HTML 净化/renderMarkdown)、`i18n`(t 插值/切换/zh-en 键与占位符对齐/**插件语言注册+回落链+可选语言列表+来源消失收敛+resolveText 多语言 UI 字段解析**)、`editor/markdown`(块级切换/格式化纯逻辑)、`schema`/`SchemaForm`(字段词汇校验+渲染)、`plugins`(探测含 SPA-fallback 坑/provider 过滤/sidebar 过滤/主题 link 注入/**editorInputPlugins 过滤**)、`UiWidget`(十 widget 契约含 checkbox/select/divider/heading/未知 type 忽略/**locale map 文本字段按语言渲染+回落**)、`api`(**editorTransform 往返+错误**)、`ChatWidget`(发送往返/**多会话持久化+隔离+新建**)、`selection`(**笔记内容区选区捕获/聊天区不覆盖/清空**)、`chatSessions`(**会话模型增删改+localStorage 往返+损坏兜底**)、`pendingWrites`(确认队列)、`diff`(行级 LCS/超预算退化)、`TagList`(标签区渲染/空时不渲染/点击回调/选中态)、`NoteTags`(加载/打标签 trim/去标签/只读)。`pnpm check` 也会类型检查测试文件。
 - **全栈 e2e**（`cd web && pnpm e2e`，Playwright，真起 Rust 后端）：代码在 `web/e2e/`。`make-fixture.mjs` 生成最小 Joplin 库（字段对齐 `serialize.rs`）；`server.mjs` 是 `webServer` 启动器——每次重建临时数据源 + 隔离 `JASPER_CONFIG_DIR`（**否则会读到开发机指向 JopinData 的已存配置**），起 `server/target/debug/jasper` 且经 `JASPER_WEB_DIR` 托管 `web/dist`；`playwright.config.ts` 里把 `127.0.0.1` 加进 `NO_PROXY`（有代理环境时健康检查才连得上）、`webServer.env` 必须并入 `process.env`。specs 覆盖 加载/搜索/渲染/编辑写回、**笔记本级联删除**（`delete-notebook.spec.ts` 自建笔记本+笔记再删掉，不碰 fixture 的 'Notebook'）、**编辑器**（`edit.spec.ts` 源码模式写回落盘、`editor-hook.spec.ts` 输入相位插件改写缓冲、`autosave-race.spec.ts` 在途保存竞态、`save-shortcut.spec.ts` Cmd/Ctrl+S 拦截+立即保存、`editor-input.spec.ts` 标题栏回车进正文+选中键入符号包裹），以及**插件流**（`plugins.spec.ts` 装 `e2e/fixtures/*.jplug`：主题自动启用→ThemePicker→卸载回落 + consent 弹窗；`locale.spec.ts` 装 `locale.jplug`：语言包自动启用→LangPicker 出现法语→选中后搜索占位符切法语→卸载回落；后端须带 `--features plugins` 构建，否则该组自动跳过；`wizard-plugin-source.spec.ts` 用 page.route 伪造 provider 断言向导 payload，无需真插件；`market.spec.ts` 用 page.route 伪造 registry 索引与下载 URL（真夹具字节+真 sha256）覆盖 浏览→安装→已装 + 坏 sha 中止 + 不兼容置灰；`sidebar.spec.ts` 用 page.route 伪造插件列表/ui 树/命令响应，但**写提案批准路径走真 PUT /api/notes** 断言落盘——提案目标用 todoNote（edit.spec 会改 plainNote，避免顺序污染））。夹具由 `e2e/make-plugin-fixtures.py` 生成（zip 已入库）。前置：先 `pnpm build` + `cargo build --features plugins` + `pnpm e2e:install`（下载 Chromium；本机没装时设 `E2E_CHANNEL=chrome` 直接用系统 Chrome）。**端口坑**：本地 `reuseExistingServer` 会复用已占 27599 的进程——若你自己的调试服务恰好挂在该端口，测试会跑在你的库上大片失败（症状：应用能开但找不到夹具笔记）；用 `JASPER_E2E_PORT=27601 pnpm e2e` 换端口，别杀自己的服务。
@@ -407,5 +412,11 @@ resource→note→folder 的权限链路接进既有黑白名单规则（同一�
 `on_success:"reload-section"`（重拉描述符+重挂分区，回显服务端新生成的 key）。端点地址由服务端下发 `{origin}`
 模板+前端填（服务端不知道客户端从哪个地址访问）；认证头在配了 key 时由服务端直接拼死、没配才留 `{header}`
 让前端填会话 token（服务端不该知道后者）。Docker 镜像已带 mcp。
+**Host 检查只在没设 key 时做**（2026-10-01）：rmcp 默认的 Host 白名单（防 DNS 重绑定）只放行本机地址，
+经反代域名 / 局域网 IP 访问时带着正确 key 也 403。key 本身就挡住了重绑定（恶意网页拿不到 key），
+故关掉 rmcp 那道，改在 `guard_mcp_access` 里：设了 key 不查 Host；没设只认本机 + `JASPER_MCP_ALLOWED_HOSTS`。
+设置页 MCP 段同时改版：`copy` 渲染成可换行代码块、带 `mask` 的默认遮住密钥（API Key 与命令）、
+新增 `chips` 型按只读/写入/删除分组列工具（`mcp::tool_groups()` 从工具标注推出）、动作可带
+`field`（挂到字段下）/`icon`/`confirm_key`（重新生成、清除先确认）。图标补了 copy/eye-off/refresh。
 
 待办：全局改标签名/删标签（写/删 tag 条目 + 级联 note_tag）、E2EE 解密（按需）；插件阶段 4 后续（`before-save` 相位前端接入 + `contributes.editor` 的可选 `command` 复用，见 docs/plugin-design.md §11）。

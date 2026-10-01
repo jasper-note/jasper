@@ -12,6 +12,9 @@ const zh = {
 	'common.rename': '重命名',
 	'common.delete': '删除',
 	'common.copy': '复制',
+	'common.copied': '已复制',
+	'common.show': '显示',
+	'common.hide': '隐藏',
 	'common.loading': '加载中…',
 	'common.untitled': '(无标题)',
 	'common.unnamed': '(未命名)',
@@ -293,13 +296,23 @@ const zh = {
 	'settings.mcp.endpoint': '端点地址',
 	'settings.mcp.apiKey': 'API Key',
 	'settings.mcp.apiKeyDesc':
-		'MCP 专用的长效密钥，与浏览器登录状态无关：服务重启、浏览器登出都不会失效。一旦设置，MCP 端点只认它。',
+		'MCP 专用的长效密钥，与浏览器登录状态无关：服务重启、浏览器登出都不会失效。一旦设置，MCP 端点只认它，也可以从局域网 IP 或域名访问。',
+	'settings.mcp.apiKeyEmpty':
+		'尚未生成。没有 API Key 时，MCP 只接受本机地址（localhost / 127.0.0.1）的访问；要从局域网 IP 或域名连接，请先生成。',
 	'settings.mcp.generate': '生成 API Key',
 	'settings.mcp.regenerate': '重新生成',
+	'settings.mcp.regenerateConfirm':
+		'重新生成后，旧的 API Key 立即失效，已配置的 MCP 客户端需要换成新命令。确定继续吗？',
 	'settings.mcp.clearKey': '清除 Key',
+	'settings.mcp.clearKeyConfirm':
+		'清除后，MCP 端点只接受本机地址的访问，用旧 Key 的客户端会立即连不上。确定继续吗？',
 	'settings.mcp.command': '添加到 Claude Code',
 	'settings.mcp.commandDesc': '在终端里执行这条命令即可接上。',
 	'settings.mcp.tools': '已暴露的工具',
+	'settings.mcp.toolsRead': '只读',
+	'settings.mcp.toolsWrite': '写入',
+	'settings.mcp.toolsDestructive': '删除',
+	'settings.mcp.toolsDesc': '删除类工具不可撤销，已标记为破坏性操作，支持该标记的客户端会在调用前请你确认。',
 	'settings.mcp.save': '保存 MCP 设置',
 	'settings.ai.loadFailed': '读取 AI 配置失败',
 
@@ -343,6 +356,9 @@ const en: typeof zh = {
 	'common.rename': 'Rename',
 	'common.delete': 'Delete',
 	'common.copy': 'Copy',
+	'common.copied': 'Copied',
+	'common.show': 'Show',
+	'common.hide': 'Hide',
 	'common.loading': 'Loading…',
 	'common.untitled': '(Untitled)',
 	'common.unnamed': '(Unnamed)',
@@ -619,13 +635,24 @@ const en: typeof zh = {
 	'settings.mcp.endpoint': 'Endpoint',
 	'settings.mcp.apiKey': 'API key',
 	'settings.mcp.apiKeyDesc':
-		'A long-lived key just for MCP, independent of your browser session: it survives restarts and logging out. Once set, the MCP endpoint accepts nothing else.',
+		'A long-lived key just for MCP, independent of your browser session: it survives restarts and logging out. Once set, the MCP endpoint accepts nothing else, and it can be reached from a LAN IP or a domain name.',
+	'settings.mcp.apiKeyEmpty':
+		'Not generated yet. Without an API key, MCP only accepts requests addressed to this machine (localhost / 127.0.0.1). Generate one to connect from a LAN IP or a domain name.',
 	'settings.mcp.generate': 'Generate API key',
 	'settings.mcp.regenerate': 'Regenerate',
+	'settings.mcp.regenerateConfirm':
+		'The current API key will stop working immediately, and configured MCP clients will need the new command. Continue?',
 	'settings.mcp.clearKey': 'Clear key',
+	'settings.mcp.clearKeyConfirm':
+		'After clearing, the MCP endpoint only accepts requests addressed to this machine, and clients using the old key will be disconnected immediately. Continue?',
 	'settings.mcp.command': 'Add to Claude Code',
 	'settings.mcp.commandDesc': 'Run this in a terminal to connect.',
 	'settings.mcp.tools': 'Exposed tools',
+	'settings.mcp.toolsRead': 'Read',
+	'settings.mcp.toolsWrite': 'Write',
+	'settings.mcp.toolsDestructive': 'Delete',
+	'settings.mcp.toolsDesc':
+		'Delete tools cannot be undone. They are marked as destructive, so clients that honor the hint ask you to confirm before calling them.',
 	'settings.mcp.save': 'Save MCP settings',
 
 	// Access control (auth)

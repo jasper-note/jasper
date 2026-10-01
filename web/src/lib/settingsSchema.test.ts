@@ -6,6 +6,9 @@ import {
 	interpretResult,
 	fillPlaceholders,
 	isDisplayField,
+	maskSecrets,
+	actionsFor,
+	chipGroups,
 	type SettingsSection,
 	type SettingsAction,
 	type SettingsField,
@@ -140,10 +143,11 @@ describe('buildRequestBody', () => {
 
 // 展示型字段（MCP 段的端点地址 / claude mcp add 命令 / 工具清单）：服务端只下发模板，
 // 运行时信息（访问地址、会话 token）由前端补；且这些字段不该回传给服务端。
-describe('display fields (copy/note)', () => {
-	it('classifies copy/note as display-only', () => {
+describe('display fields (copy/note/chips)', () => {
+	it('classifies copy/note/chips as display-only', () => {
 		expect(isDisplayField('copy')).toBe(true)
 		expect(isDisplayField('note')).toBe(true)
+		expect(isDisplayField('chips')).toBe(true)
 		expect(isDisplayField('text')).toBe(false)
 		expect(isDisplayField('bool')).toBe(false)
 	})
@@ -172,10 +176,76 @@ describe('display fields (copy/note)', () => {
 		const fields: SettingsField[] = [
 			{ key: 'enabled', type: 'bool' },
 			{ key: 'endpoint', type: 'copy' },
-			{ key: 'tools', type: 'note' },
+			{ key: 'note', type: 'note' },
+			{ key: 'tools', type: 'chips' },
 		]
-		const values = { enabled: true, endpoint: '{origin}/mcp', tools: 'search_notes、get_note' }
+		const values = {
+			enabled: true,
+			endpoint: '{origin}/mcp',
+			note: 'text',
+			tools: [{ label_key: 'settings.mcp.toolsRead', items: ['search_notes'] }],
+		}
 		expect(buildRequestBody('mcp', save, values, fields)).toEqual({ enabled: true })
+	})
+})
+
+// 密钥遮挡：API Key 与含 key 的命令默认显示圆点，复制仍复制原文（遮挡只作用于显示）。
+describe('maskSecrets', () => {
+	const key = 'jasper_mcp_' + 'ab12'.repeat(16)
+
+	it('masks every occurrence and keeps the last 4 characters', () => {
+		const cmd = `claude mcp add jasper http://h/mcp --header "Authorization: Bearer ${key}"`
+		const out = maskSecrets(cmd, [key])
+		expect(out).not.toContain(key)
+		expect(out).toBe(`claude mcp add jasper http://h/mcp --header "Authorization: Bearer ${'•'.repeat(20)}ab12"`)
+		expect(maskSecrets(`${key} ${key}`, [key])).toBe(`${'•'.repeat(20)}ab12 ${'•'.repeat(20)}ab12`)
+	})
+
+	it('masks short secrets entirely', () => {
+		expect(maskSecrets('token=abc123', ['abc123'])).toBe('token=••••••')
+	})
+
+	it('skips empty secrets and leaves text without secrets unchanged', () => {
+		// 没设 key 时 values.api_key 是空串、未登录时会话 token 是 null：都不能把文本搞乱
+		expect(maskSecrets('http://h/mcp', ['', null, undefined])).toBe('http://h/mcp')
+		expect(maskSecrets('http://h/mcp', [key])).toBe('http://h/mcp')
+	})
+})
+
+describe('actionsFor', () => {
+	const mk = (id: string, field?: string): SettingsAction => ({
+		id,
+		label_key: id,
+		field,
+		request: { method: 'PUT', url: '/x', convention: 'status' },
+	})
+	const actions = [mk('save'), mk('generate', 'api_key'), mk('clear_key', 'api_key'), mk('other', 'endpoint')]
+
+	it('splits inline actions by field and keeps the rest for the footer', () => {
+		expect(actionsFor(actions, 'api_key').map((a) => a.id)).toEqual(['generate', 'clear_key'])
+		expect(actionsFor(actions, 'endpoint').map((a) => a.id)).toEqual(['other'])
+		expect(actionsFor(actions).map((a) => a.id)).toEqual(['save'])
+		expect(actionsFor(undefined)).toEqual([])
+	})
+})
+
+describe('chipGroups', () => {
+	it('accepts well-formed groups and drops malformed ones', () => {
+		const groups = [
+			{ label_key: 'settings.mcp.toolsRead', items: ['get_note'] },
+			{ label_key: 'settings.mcp.toolsDestructive', tone: 'danger', items: ['delete_note'] },
+			{ items: ['no label'] },
+			null,
+		]
+		expect(chipGroups(groups).map((g) => g.label_key)).toEqual([
+			'settings.mcp.toolsRead',
+			'settings.mcp.toolsDestructive',
+		])
+	})
+
+	it('falls back to nothing for an older server that sent a plain string', () => {
+		expect(chipGroups('search_notes、get_note')).toEqual([])
+		expect(chipGroups(undefined)).toEqual([])
 	})
 })
 

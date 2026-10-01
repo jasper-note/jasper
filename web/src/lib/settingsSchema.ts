@@ -28,8 +28,10 @@ export type SettingsFieldType =
 	| 'provider-config'
 	// 只读展示 + 一键复制（如 MCP 端点地址、`claude mcp add` 命令）。值不参与提交。
 	| 'copy'
-	// 纯展示文本（如 MCP 已暴露的工具清单）。值不参与提交。
+	// 纯展示文本。值不参与提交。
 	| 'note'
+	// 分组标签（如 MCP 已暴露的工具，按只读/写入/删除分组）。值是 ChipGroup[]，不参与提交。
+	| 'chips'
 
 export interface SettingsFieldOption {
 	value: string
@@ -42,7 +44,10 @@ export interface SettingsField {
 	label_key?: string
 	desc_key?: string
 	placeholder_key?: string
-	empty_key?: string // notebook-multiselect 无候选时的空态文案键
+	empty_key?: string // notebook-multiselect 无候选 / copy 值为空时的空态文案键
+	// copy 字段：values 里哪个键是要遮住的密钥（如 MCP 的 api_key）。文本里出现的该密钥
+	// （以及浏览器会话 token）默认显示为圆点，点眼睛图标才露出；复制按钮始终复制原文。
+	mask?: string
 	default?: unknown
 	required?: boolean
 	options?: SettingsFieldOption[]
@@ -70,6 +75,17 @@ export interface SettingsAction {
 	on_success?: 'reload' | 'relogin' | 'saved' | 'reload-section' | 'none'
 	show_if?: ShowIf
 	submit?: boolean // false = 只发 request.extra，不带字段值（如清除密码）
+	// 挂在哪个字段下面渲染（如 MCP 的生成/重新生成/清除挂在 api_key 下）；不填 = 分区底部动作栏
+	field?: string
+	icon?: string
+	confirm_key?: string // 有值 → 执行前先弹确认（不可撤销的动作，如让旧密钥失效）
+}
+
+/** chips 字段的一组标签。tone=danger 用于不可撤销的一类（如删除类工具）。 */
+export interface ChipGroup {
+	label_key: string
+	tone?: 'default' | 'danger'
+	items: string[]
 }
 
 export interface SettingsSection {
@@ -94,9 +110,37 @@ export function resolveLabel(key: string | undefined): string {
 	return t(key as MsgKey)
 }
 
-/** 展示型字段（copy/note）：只读，不参与动作提交的载荷。 */
+/** 展示型字段（copy/note/chips）：只读，不参与动作提交的载荷。 */
 export function isDisplayField(type: SettingsFieldType): boolean {
-	return type === 'copy' || type === 'note'
+	return type === 'copy' || type === 'note' || type === 'chips'
+}
+
+/**
+ * 把文本里出现的密钥换成圆点。保留末 4 位便于辨认是哪一把（重新生成后能看出变了），
+ * 太短的密钥整段遮住。空串/null 跳过；遮不到任何东西时原样返回（调用方据此决定要不要显示眼睛图标）。
+ */
+export function maskSecrets(text: string, secrets: (string | null | undefined)[]): string {
+	let out = text
+	for (const s of secrets) {
+		if (!s) continue
+		const masked = s.length >= 16 ? '•'.repeat(20) + s.slice(-4) : '•'.repeat(s.length)
+		out = out.replaceAll(s, masked)
+	}
+	return out
+}
+
+/** 挂在某字段下的动作（field 匹配）；不传 field = 分区底部动作栏里的那些（未声明 field 的）。 */
+export function actionsFor(actions: SettingsAction[] | undefined, field?: string): SettingsAction[] {
+	return (actions ?? []).filter((a) => (field === undefined ? !a.field : a.field === field))
+}
+
+/** chips 字段值 → 分组；值形状不对（老服务端下发的是字符串）时退回空数组，不让渲染炸掉。 */
+export function chipGroups(value: unknown): ChipGroup[] {
+	if (!Array.isArray(value)) return []
+	return value.filter(
+		(g): g is ChipGroup =>
+			!!g && typeof g === 'object' && typeof g.label_key === 'string' && Array.isArray(g.items),
+	)
 }
 
 /**

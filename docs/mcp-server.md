@@ -32,6 +32,27 @@ claude mcp add --transport http jasper http://127.0.0.1:27583/mcp \
 其它客户端按各自的 Streamable HTTP 配置方式填 `http://<host>:<port>/mcp` 即可，密钥同样走
 `Authorization: Bearer` 头。
 
+**从局域网 IP 或反向代理的域名访问，必须先生成 API Key**——见下「Host 检查」。
+
+## Host 检查（防 DNS 重绑定）
+
+DNS 重绑定：恶意网页把自己的域名解析到 `127.0.0.1` 或局域网 IP，借用户的浏览器以「同源」身份
+访问本地服务。rmcp 的默认配置用 Host 白名单防它，只放行本机地址——但它一刀切：经反向代理的
+域名、局域网 IP 一律 `403 Forbidden: Host header is not allowed`，**带着正确的 API key 也一样**
+（2026-10 线上实测踩到）。
+
+而 API key 本身就挡住了这类攻击：恶意网页拿不到 key，浏览器也不会自动带上 `Authorization` 头。
+所以 jasper 关掉 rmcp 自带的检查，改在 `guard_mcp_access` 里按是否设了 key 区分：
+
+| | 设了 API key | 没设 API key |
+|---|---|---|
+| Host 为本机地址（`localhost` / `127.0.0.1` / `[::1]`，任意端口） | 校验 key | 放行 |
+| 其它 Host（域名、局域网 IP） | 校验 key | `403 {"error":"mcp_host_not_allowed"}`，除非在 `JASPER_MCP_ALLOWED_HOSTS` 里 |
+| 没有 Host（非浏览器请求，如 HTTP/2 只带 `:authority` 时取它） | 校验 key | 放行 |
+
+`JASPER_MCP_ALLOWED_HOSTS`：逗号分隔，不区分大小写；写了端口（`192.168.1.160:27583`）就连端口
+一起比，不写则任意端口；`*` 放行全部。只在没设 key 时起作用，启动后读一次。
+
 ## API key
 
 MCP 有**自己的一把长效密钥**，与浏览器登录状态完全解耦。这是必要的：会话 token 存在内存
@@ -94,7 +115,8 @@ MCP 客户端  ──Authorization: Bearer <key>──▶
   guard_mcp_access（仅挂在 MCP 子 router，mcp.rs）
     ① 开关关了 → 503
     ② 配了 API key 且不匹配 → 401（会话 token 也不行）
-       匹配 → 用 Access::Full 覆盖请求扩展
+       匹配 → 用 Access::Full 覆盖请求扩展（不查 Host）
+       没配 key → Host 不是本机地址且不在 JASPER_MCP_ALLOWED_HOSTS → 403
   工具层
     写/删：deny_read_only() → require_full()
     读：  把 Access 交给原 handler，继承它的 Scope 过滤
@@ -139,10 +161,20 @@ HTTP 与 MCP 两条路径不会随时间漂移。代价只是 api.rs 里若干 `
 ## 设置页
 
 MCP 段走既有的 server-driven 设置描述符（`GET /api/settings/schema`），仅在
-`--features mcp` 构建里出现。为此给字段词汇加了两个展示型类型：
+`--features mcp` 构建里出现。为此给字段词汇加了三个展示型类型：
 
-- `copy` —— 只读 + 一键复制（端点地址、`claude mcp add` 命令）
-- `note` —— 纯展示文本（工具清单）
+- `copy` —— 只读 + 一键复制（端点地址、API Key、`claude mcp add` 命令）。渲染成可换行的代码块，
+  长命令不截断；点一下文本即全选。值为空时显示 `empty_key` 的说明文字。
+  带 `mask: "<values 键>"` 时，文本里出现的该密钥（以及浏览器会话 token）默认显示为圆点
+  （保留末 4 位便于辨认），点眼睛图标切换；复制按钮始终复制原文。API Key 和命令都带它。
+- `note` —— 纯展示文本
+- `chips` —— 分组标签，值为 `[{label_key, tone?, items[]}]`。工具清单用它按只读 / 写入 / 删除
+  分组，删除组 `tone: "danger"`。分组由 `mcp::tool_groups()` 直接读 `#[tool_router]` 生成的
+  工具表、按标注（`read_only_hint` / `destructive_hint`）推出，不另维护清单。
+
+动作也加了三个可选属性：`field`（挂在该字段下面渲染，而不是分区底部——生成 / 重新生成 / 清除
+都挂在 API Key 下）、`icon`、`confirm_key`（执行前弹确认；重新生成与清除会让正在用的 key
+立即失效，都带它）。
 
 服务端不知道客户端是从哪个地址访问它的（`127.0.0.1`？局域网 IP？反代域名？），所以端点地址
 下发的是**模板**，留 `{origin}` 占位符由前端填（`settingsSchema.ts::fillPlaceholders`）。
@@ -166,8 +198,14 @@ MCP 段走既有的 server-driven 设置描述符（`GET /api/settings/schema`�
     重新生成使旧 key 立即失效；清除后回落既有行为；`regenerate+clear` 同时传 → 400
   - `mcp_config_endpoint_is_guarded_like_any_other_setting` —— 管理端点匿名 401、只读 403
   - `mcp_endpoint_bypasses_method_guards_and_honors_switch` —— 只读+匿名下守卫不拦、关掉后 503
+  - `mcp_host_check_applies_only_without_api_key` —— 没设 key：本机 Host 握手 200、域名/局域网 IP
+    403；设了 key：同样的 Host 带 key 握手 200（断言的是 200 而非「不是 401」，rmcp 自带的
+    Host 检查没关掉这里就会失败）
+- `server/src/mcp.rs`：`strip_port`（域名/IPv4/带方括号与裸 IPv6）、`host_allowed` 与
+  `JASPER_MCP_ALLOWED_HOSTS` 解析（带不带端口、大小写、`*`）、`tool_groups` 按标注分组且不漏工具。
 - `web/src/lib/settingsSchema.test.ts`：占位符填充、无 token 时不留空 Authorization 头、
-  `truthy:false` 显隐、展示型字段不进请求体。
+  `truthy:false` 显隐、展示型字段（含 chips）不进请求体、`maskSecrets` 遮挡、`actionsFor`
+  按字段拆分动作、`chipGroups` 容错。
 - 全链路手测（curl 走完整 Streamable HTTP 握手）覆盖：initialize → tools/list（13 个，
   annotations 正确）→ search/get/create/update/tag 往返 → 级联 delete_folder → 磁盘 Joplin
   格式核对 → 只读拒写放读 → 匿名拒写、带 token 放行 → 生成 key 后 401/401/200 三态 →

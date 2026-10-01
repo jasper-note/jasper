@@ -15,7 +15,9 @@
 //!   JASPER_READ_ONLY     只读模式引导（truthy=1/true/yes/on；仅当尚无保存配置时生效）
 //!   JASPER_WEB_DIR       前端静态目录覆盖（设了就从该磁盘目录托管，可热替换前端）；
 //!                             不设时：embed 构建用内嵌资源，否则用源码旁 ../web/dist
-//!   RUST_LOG              日志级别过滤（tracing_subscriber::EnvFilter 语法，如 `jasper=trace`）；
+//!   JASPER_MCP_ALLOWED_HOSTS  （仅 mcp 构建）没设 MCP API Key 时额外放行的 Host，逗号分隔；
+//!                             写了端口就连端口一起比，`*` 放行全部。设了 key 后不查 Host
+//!   RUST_LOG             日志级别过滤（tracing_subscriber::EnvFilter 语法，如 `jasper=trace`）；
 //!                             不设时默认 `jasper=debug,tower_http=debug,info`
 
 mod api;

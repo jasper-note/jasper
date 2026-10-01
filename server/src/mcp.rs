@@ -5,7 +5,7 @@
 //! [`crate::api::MCP_PATH`] 下——不另起进程、不另开端口，jasper 跑着就有 MCP。
 //!
 //! 本文件在**两种构建模式下都编译**：feature 关闭时只剩零成本桩（`router()` 返回空路由、
-//! `TOOL_NAMES` 为空、`ENABLED` 为 false），默认构建不引入 rmcp/schemars 任何依赖。
+//! `tool_groups()` 为空、`ENABLED` 为 false），默认构建不引入 rmcp/schemars 任何依赖。
 //!
 //! ## 为什么工具直接调 api.rs 的 handler
 //!
@@ -21,6 +21,16 @@
 //! （见 [`crate::api::MCP_PATH`]），改由这里逐个工具门控：
 //! - 读工具：把 `Access` 原样交给 handler，可见范围过滤照旧在 handler 里做；
 //! - 写工具：先查全局只读（[`deny_read_only`]）、再要求 [`Access::Full`]（[`require_full`]）。
+//!
+//! ## Host 检查为什么自己做、且只在没设 API key 时做
+//!
+//! rmcp 默认只放行 Host 为本机地址的请求，用来防 DNS 重绑定（恶意网页把自己的域名解析到
+//! 127.0.0.1 / 局域网 IP，借用户浏览器同源访问本地服务）。但它对所有请求一刀切：经反向代理的
+//! 域名、局域网 IP 一律 403，哪怕带着正确的 API key。
+//!
+//! 而 API key 本身就挡住了这类攻击——恶意网页拿不到 key，浏览器也不会自动带上 Bearer 头。
+//! 所以把这道检查挪到 `guard_mcp_access`：**设了 key 不查 Host**；没设 key 时仍只认
+//! 本机地址，外加环境变量 `JASPER_MCP_ALLOWED_HOSTS` 显式放行的地址。rmcp 自己那道关掉。
 
 use crate::api::AppState;
 use axum::Router;
@@ -30,7 +40,7 @@ use std::sync::Arc;
 pub(crate) const ENABLED: bool = cfg!(feature = "mcp");
 
 #[cfg(feature = "mcp")]
-pub(crate) use imp::{router, TOOL_NAMES};
+pub(crate) use imp::{router, tool_groups};
 
 #[cfg(not(feature = "mcp"))]
 pub(crate) fn router(_state: Arc<AppState>) -> Router<Arc<AppState>> {
@@ -39,7 +49,9 @@ pub(crate) fn router(_state: Arc<AppState>) -> Router<Arc<AppState>> {
 
 /// feature 关闭时没有任何工具可列。
 #[cfg(not(feature = "mcp"))]
-pub(crate) const TOOL_NAMES: &[&str] = &[];
+pub(crate) fn tool_groups() -> Vec<(&'static str, Vec<String>)> {
+    Vec::new()
+}
 
 #[cfg(feature = "mcp")]
 mod imp {
@@ -61,22 +73,69 @@ mod imp {
     use serde_json::Value;
     use std::sync::atomic::Ordering;
 
-    /// 暴露的工具名（设置页展示用，与下面 `#[tool]` 一一对应；改这里记得同步 impl）。
-    pub(crate) const TOOL_NAMES: &[&str] = &[
-        "search_notes",
-        "get_note",
-        "list_notes",
-        "list_folders",
-        "list_tags",
-        "notes_by_tag",
-        "create_note",
-        "update_note",
-        "create_folder",
-        "add_note_tag",
-        "remove_note_tag",
-        "delete_note",
-        "delete_folder",
-    ];
+    /// 已暴露的工具按标注分三组（设置页展示用）：`read`（read_only_hint）/ `destructive`
+    /// （destructive_hint）/ 其余为 `write`。直接读 `#[tool_router]` 生成的工具表，
+    /// 增删工具不必再同步一份清单。组内按名字排序，展示顺序稳定。
+    pub(crate) fn tool_groups() -> Vec<(&'static str, Vec<String>)> {
+        let (mut read, mut write, mut destructive) = (Vec::new(), Vec::new(), Vec::new());
+        for tool in JasperMcp::tool_router().list_all() {
+            let hint = |f: fn(&rmcp::model::ToolAnnotations) -> Option<bool>| {
+                tool.annotations.as_ref().and_then(f) == Some(true)
+            };
+            let name = tool.name.to_string();
+            if hint(|a| a.read_only_hint) {
+                read.push(name);
+            } else if hint(|a| a.destructive_hint) {
+                destructive.push(name);
+            } else {
+                write.push(name);
+            }
+        }
+        for g in [&mut read, &mut write, &mut destructive] {
+            g.sort();
+        }
+        vec![("read", read), ("write", write), ("destructive", destructive)]
+    }
+
+    /// 没设 API key 时始终放行的 Host（比较时已去掉端口）。
+    const LOCAL_HOSTS: &[&str] = &["localhost", "127.0.0.1", "[::1]", "::1"];
+
+    /// `JASPER_MCP_ALLOWED_HOSTS`：没设 API key 时额外放行的 Host，逗号分隔。
+    /// 写了端口就连端口一起比，不写则任意端口；`*` 放行全部。只在首次用到时读一次环境变量。
+    fn extra_allowed_hosts() -> &'static [String] {
+        static HOSTS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+        HOSTS.get_or_init(|| {
+            parse_allowed_hosts(&std::env::var("JASPER_MCP_ALLOWED_HOSTS").unwrap_or_default())
+        })
+    }
+
+    fn parse_allowed_hosts(raw: &str) -> Vec<String> {
+        raw.split(',')
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
+    /// 去掉 Host 里的端口：`a.com:8080` → `a.com`、`[::1]:27583` → `[::1]`；
+    /// 不带方括号的裸 IPv6（多个冒号）原样返回。
+    fn strip_port(host: &str) -> &str {
+        if host.starts_with('[') {
+            return host.find(']').map_or(host, |end| &host[..=end]);
+        }
+        match host.rsplit_once(':') {
+            Some((name, port)) if !name.contains(':') && port.bytes().all(|b| b.is_ascii_digit()) => name,
+            _ => host,
+        }
+    }
+
+    /// 没设 API key 时，这个 Host 能不能访问 MCP。
+    /// 没有 Host 的请求放行：浏览器一定会带 Host，没带的不可能是 DNS 重绑定。
+    fn host_allowed(host: Option<&str>, extra: &[String]) -> bool {
+        let Some(host) = host else { return true };
+        let host = host.trim().to_ascii_lowercase();
+        let name = strip_port(&host);
+        LOCAL_HOSTS.contains(&name) || extra.iter().any(|h| h == "*" || *h == host || h == name)
+    }
 
     /// 搜索默认返回条数上限。笔记库动辄上百篇，全量倒进模型上下文既慢又不会被读完；
     /// 需要更多由调用方显式传 `limit`。
@@ -507,15 +566,17 @@ mod imp {
         }
     }
 
-    /// MCP 端点的准入：运行时开关 + 独立 API key。只挂在 MCP 子 router 上，不影响其它路由。
-    /// router 只在启动时构建一次，故两者都必须在**请求时**查，不能在构建时分支。
+    /// MCP 端点的准入：运行时开关 + 独立 API key + Host 检查。只挂在 MCP 子 router 上，不影响其它路由。
+    /// router 只在启动时构建一次，故这些都必须在**请求时**查，不能在构建时分支。
     ///
     /// API key 是给 MCP **单独上的一把锁**，与浏览器会话解耦：
     /// - 设了 key → `/mcp` 只认这把 key，带错/不带一律 401，**会话 token 也不行**。
     ///   这样「配了 key」才等于「只有拿钥匙的进得来」——否则未设访问密码时设了 key 等于没设。
     ///   校验通过即把 [`Access::Full`] 覆盖进请求扩展（guard_auth 先跑、给的是 Anonymous），
-    ///   工具层照常从扩展里取，无需感知 key 的存在。
-    /// - 没设 key → 维持原行为：guard_auth 算出的 Access 照旧（会话 token / 未设密码时恒 Full）。
+    ///   工具层照常从扩展里取，无需感知 key 的存在。**不查 Host**（见模块文档），
+    ///   所以经反向代理的域名、局域网 IP 都能直接用。
+    /// - 没设 key → 只认本机地址的 Host（+ `JASPER_MCP_ALLOWED_HOSTS`），其余 403；
+    ///   通过后维持原行为：guard_auth 算出的 Access 照旧（会话 token / 未设密码时恒 Full）。
     ///
     /// 万一 key 丢了也锁不死自己：设置页走的是普通的 `/api/mcp/config`，用浏览器身份即可重置。
     async fn guard_mcp_access(
@@ -538,7 +599,28 @@ mod imp {
             )
                 .into_response();
         }
-        if !key.is_empty() {
+        if key.is_empty() {
+            // HTTP/2 没有 Host 头，用请求行里的 authority；Host 头存在但不是合法文本 → 当空串，必然不放行
+            let host = match req.headers().get(axum::http::header::HOST) {
+                Some(v) => Some(v.to_str().unwrap_or_default()),
+                None => req.uri().authority().map(|a| a.as_str()),
+            };
+            if !host_allowed(host, extra_allowed_hosts()) {
+                let host = host.unwrap_or_default();
+                tracing::warn!(host, "mcp request rejected: host not allowed without an api key");
+                return (
+                    axum::http::StatusCode::FORBIDDEN,
+                    AxumJson(serde_json::json!({
+                        "error": "mcp_host_not_allowed",
+                        "message": format!(
+                            "未设置 MCP API Key 时只接受本机地址的访问（当前 Host：{host}）。\
+                             请在设置页 MCP 段生成 API Key，或用环境变量 JASPER_MCP_ALLOWED_HOSTS 放行该地址"
+                        )
+                    })),
+                )
+                    .into_response();
+            }
+        } else {
             let ok = crate::api::bearer_token(req.headers())
                 .map(|t| crate::auth::secret_eq(&t, &key))
                 .unwrap_or(false);
@@ -564,10 +646,69 @@ mod imp {
         let service = StreamableHttpService::new(
             move || Ok(JasperMcp::new(svc_state.clone())),
             Arc::new(LocalSessionManager::default()),
-            StreamableHttpServerConfig::default(),
+            // rmcp 默认只放行 Host 为 localhost / 127.0.0.1 / ::1 的请求，带着正确 key 的
+            // 反代域名、局域网 IP 也会被它 403。关掉，改由 guard_mcp_access 按是否设了 key 判断
+            // （见模块文档「Host 检查」）。Origin 检查 rmcp 默认就是关的，不动。
+            StreamableHttpServerConfig::default().disable_allowed_hosts(),
         );
         Router::new()
             .nest_service(crate::api::MCP_PATH, service)
             .layer(axum::middleware::from_fn_with_state(state, guard_mcp_access))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn strip_port_handles_names_ipv4_and_ipv6() {
+            assert_eq!(strip_port("example.com"), "example.com");
+            assert_eq!(strip_port("example.com:8080"), "example.com");
+            assert_eq!(strip_port("192.168.1.160:27583"), "192.168.1.160");
+            assert_eq!(strip_port("[::1]:27583"), "[::1]");
+            assert_eq!(strip_port("[::1]"), "[::1]");
+            assert_eq!(strip_port("::1"), "::1"); // 裸 IPv6 不能把最后一段当端口
+        }
+
+        #[test]
+        fn host_check_allows_local_and_listed_hosts_only() {
+            let none: Vec<String> = Vec::new();
+            for h in ["localhost", "localhost:27583", "127.0.0.1:27583", "[::1]:27583", "LOCALHOST"] {
+                assert!(host_allowed(Some(h), &none), "本机地址应放行: {h}");
+            }
+            for h in ["jasper.example.com", "192.168.1.160:27583", "evil.test:27583", ""] {
+                assert!(!host_allowed(Some(h), &none), "非本机地址应拒绝: {h:?}");
+            }
+            // 没有 Host 的请求不可能来自浏览器 → 放行
+            assert!(host_allowed(None, &none));
+
+            // 环境变量：不写端口 = 任意端口；写了端口就要完全一致；大小写与空白不敏感
+            let extra = parse_allowed_hosts(" Jasper.Example.com , 192.168.1.160:27583,,");
+            assert_eq!(extra, vec!["jasper.example.com", "192.168.1.160:27583"]);
+            assert!(host_allowed(Some("jasper.example.com"), &extra));
+            assert!(host_allowed(Some("jasper.example.com:8443"), &extra));
+            assert!(host_allowed(Some("192.168.1.160:27583"), &extra));
+            assert!(!host_allowed(Some("192.168.1.160:8080"), &extra));
+            assert!(!host_allowed(Some("evil.test"), &extra));
+
+            let any = parse_allowed_hosts("*");
+            assert!(host_allowed(Some("evil.test"), &any));
+        }
+
+        /// 分组从工具表的标注推出来：与 docs/mcp-server.md 的工具表一致，且一个不漏。
+        #[test]
+        fn tool_groups_follow_annotations() {
+            let groups = tool_groups();
+            let get = |id: &str| groups.iter().find(|(g, _)| *g == id).map(|(_, v)| v.clone()).unwrap();
+            assert_eq!(
+                get("read"),
+                ["get_note", "list_folders", "list_notes", "list_tags", "notes_by_tag", "search_notes"]
+            );
+            assert_eq!(
+                get("write"),
+                ["add_note_tag", "create_folder", "create_note", "remove_note_tag", "update_note"]
+            );
+            assert_eq!(get("destructive"), ["delete_folder", "delete_note"]);
+        }
     }
 }
