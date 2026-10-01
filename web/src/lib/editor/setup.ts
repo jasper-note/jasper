@@ -1,5 +1,5 @@
 // 编辑器基础扩展集：一个 CodeMirror 6 实例，源码/Live Preview 是同一实例的两种视图。
-// 关键能力：tab 缩进、选中包围（closeBrackets + 自定义 * _ ~ = 包裹）、markdown(GFM) 语法、
+// 关键能力：tab 缩进、选中包围（closeBrackets + 自定义 * _ ~ = ` 与中文全角符号包裹）、markdown(GFM) 语法、
 // 主题、列表续行等。模式/只读/插件扩展各用一个 compartment，运行时可热切换、不重建实例。
 
 import {
@@ -30,11 +30,29 @@ export const pluginCompartment = new Compartment()
 export const modeExtension = (mode: EditorMode): Extension => (mode === 'live' ? livePreview : [])
 export const readOnlyExtension = (ro: boolean): Extension => [EditorState.readOnly.of(ro), EditorView.editable.of(!ro)]
 
-// 选中后直接键入 * _ ~ = 即包裹选区（括号/引号/反引号由 closeBrackets 负责）。
-const WRAP: Record<string, string> = { '*': '*', _: '_', '~': '~', '=': '=' }
+// 选中后直接键入下列符号即包裹选区（键入的字符 → [左, 右]）；无选区照常输入，不自动补全配对。
+// ( [ { ' " 由 closeBrackets 负责；markdown 的 closeBrackets 默认列表不含反引号，故 ` 放这里。
+// 中文输入法下 " ' 键在左右引号间交替出字，敲到左引号或右引号都按同一对包裹。
+// 用 Map 而非对象字面量：输入法一次提交的整词（如 "constructor"）不会命中原型链上的属性。
+const WRAP = new Map<string, [string, string]>([
+	['*', ['*', '*']],
+	['_', ['_', '_']],
+	['~', ['~', '~']],
+	['=', ['=', '=']],
+	['`', ['`', '`']],
+	['（', ['（', '）']],
+	['【', ['【', '】']],
+	['「', ['「', '」']],
+	['《', ['《', '》']],
+	['“', ['“', '”']],
+	['”', ['“', '”']],
+	['‘', ['‘', '’']],
+	['’', ['‘', '’']],
+])
 const wrapOnType = EditorView.inputHandler.of((view, _from, _to, text) => {
-	const mk = WRAP[text]
-	if (!mk) return false
+	const pair = WRAP.get(text)
+	if (!pair) return false
+	const [open, close] = pair
 	const { state } = view
 	if (state.selection.ranges.every((r) => r.empty)) return false // 无选区 → 正常输入
 	view.dispatch(
@@ -42,10 +60,10 @@ const wrapOnType = EditorView.inputHandler.of((view, _from, _to, text) => {
 			if (range.empty) return { range }
 			return {
 				changes: [
-					{ from: range.from, insert: mk },
-					{ from: range.to, insert: mk },
+					{ from: range.from, insert: open },
+					{ from: range.to, insert: close },
 				],
-				range: EditorSelection.range(range.from + mk.length, range.to + mk.length),
+				range: EditorSelection.range(range.from + open.length, range.to + open.length),
 			}
 		}),
 		{ userEvent: 'input.wrap' },

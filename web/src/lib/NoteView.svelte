@@ -124,6 +124,16 @@
     }
   }
 
+  // 标题栏回车 → 光标跳到正文开头接着写。输入法组字时的回车是确认候选词，不能跳：
+  // isComposing 覆盖 Chrome/Firefox；Safari 确认候选的那次 keydown 已不带 isComposing，只能靠 keyCode 229 认出。
+  function onTitleKeydown(e: KeyboardEvent) {
+    if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229) return
+    if (e.shiftKey || e.altKey || e.metaKey || e.ctrlKey) return
+    if (!editorHandle) return
+    e.preventDefault()
+    editorHandle.focusStart()
+  }
+
   function onBodyChange(v: string) {
     body = v
     if (applyingExternal) return // 程序化写入（外部同步）不排自动保存
@@ -362,6 +372,7 @@
         class="title-input"
         bind:value={title}
         oninput={scheduleSave}
+        onkeydown={onTitleKeydown}
         placeholder={t('note.titlePlaceholder')}
       />
       <div class="editor-wrap" data-ai-selectable>

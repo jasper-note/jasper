@@ -13,6 +13,8 @@ export type EditorMode = 'source' | 'live'
 export interface EditorHandle {
 	readonly mode: EditorMode
 	focus(): void
+	// 聚焦并把光标移到正文开头（标题栏回车进正文用）。
+	focusStart(): void
 	getValue(): string
 	setValue(md: string): void
 	// 行内包裹：选区两侧加 marker（如 `**`）；无选区则插占位并选中；已包裹则去除（切换）。

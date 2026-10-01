@@ -69,6 +69,10 @@ export function makeHandle(view: EditorView, getMode: () => EditorMode): EditorH
 			return getMode()
 		},
 		focus: () => view.focus(),
+		focusStart: () => {
+			view.dispatch({ selection: { anchor: 0 }, scrollIntoView: true })
+			view.focus()
+		},
 		getValue: () => view.state.doc.toString(),
 		setValue: (md) => {
 			view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: md } })

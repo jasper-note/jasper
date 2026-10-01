@@ -28,6 +28,7 @@ A lightweight, **read-write** [Joplin](https://joplinapp.org/)-compatible client
 ### ✍️ Editing
 - **Two views, one editor, one click apart**: a **Live preview** (Obsidian-style — syntax reveals itself around the cursor while images, PDFs, tables and math render in place) and plain **Markdown source**. It is the same CodeMirror 6 instance either way, so switching views never rebuilds or reformats your note. Live preview is the default; your choice is remembered, and the editor chunk is lazy-loaded.
 - **Autosave** while you type; create / update / delete notes. Opening a note never writes anything by itself — only your edits do. **Cmd/Ctrl+S** saves the current note on the spot (no browser "Save page" dialog).
+- Small typing conveniences: **Enter** in the title jumps to the start of the body; typing a bracket, quote or Markdown marker over a selection **wraps** it instead of replacing it — `` ( [ { ' " ` * _ ~ = `` plus full-width `（ 【 「 《 “ ‘`.
 - Your Markdown is kept **byte-for-byte**: neither view reformats it on open or save — reformatting happens only when you run the toolbar's format command. HTML notes always open in source view.
 - Write-back preserves every metadata field verbatim and only refreshes the timestamps — minimal diff, friendly to Joplin's conflict handling.
 
