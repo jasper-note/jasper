@@ -125,7 +125,7 @@ docker compose -f docker-compose.dev.yml down -v   # 用完清理（含数据卷
   - Rust：在 worktree 根写一份 `.cargo/config.toml`（已加入 `.gitignore`，不会被提交、也不会自动出现在其它 worktree）指向仓库外的共享 target 目录：
     ```toml
     [build]
-    target-dir = "/Users/xvan/agent-home/joplin-lite/.worktree-cache/cargo-target"
+    target-dir = "/Users/xvan/agent-home/jasper-note/.worktree-cache/cargo-target"
     ```
     之后 `server/core/plugin-sdk/wasm/plugins-examples/*` 里跑 `cargo build/test` 都会自动复用这份编译缓存，只增量编译改动的部分。
   - 前端：`web/node_modules` 仍需在每个 worktree 里跑一次 `pnpm install`，但 pnpm 全局 store 内容寻址、装得很快，不用额外配置。
