@@ -60,8 +60,8 @@ mod imp {
     use axum::extract::{Path, Query, State};
     use axum::Extension;
     use axum::Json as AxumJson;
-    use rmcp::handler::server::wrapper::{Json, Parameters};
-    use rmcp::model::{ProtocolVersion, ServerCapabilities, ServerConfig};
+    use rmcp::handler::server::wrapper::Parameters;
+    use rmcp::model::{CallToolResult, ContentBlock, ProtocolVersion, ServerCapabilities, ServerConfig};
     use rmcp::service::{RequestContext, RoleServer};
     use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
     use rmcp::transport::streamable_http_server::{
@@ -70,7 +70,6 @@ mod imp {
     use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
     use schemars::JsonSchema;
     use serde::Deserialize;
-    use serde_json::Value;
     use std::sync::atomic::Ordering;
 
     /// 已暴露的工具按标注分三组（设置页展示用）：`read`（read_only_hint）/ `destructive`
@@ -269,9 +268,14 @@ mod imp {
         ErrorData::invalid_request(msg, None)
     }
 
-    fn json_of<T: serde::Serialize>(v: T) -> Result<Json<Value>, ErrorData> {
-        serde_json::to_value(v)
-            .map(Json)
+    /// 结果只放进文本内容块，**不**用 rmcp 的 `Json<T>` 包装。`Json<T>` 会让工具声明
+    /// `outputSchema`、结果带 `structuredContent`：rmcp 3.4 按 SEP-2106 允许二者不是 object
+    /// （`Value` 生成的 schema 没有 `type`，列表类工具的 structuredContent 是数组），
+    /// 但按 2025-06-18 规范校验的客户端（如 Kimi）要求它们是 object，`tools/list` 一校验失败
+    /// 整个 server 都连不上。模型读的本来就是文本内容块，去掉结构化输出对它没有影响。
+    fn json_of<T: serde::Serialize>(v: T) -> Result<CallToolResult, ErrorData> {
+        serde_json::to_string(&v)
+            .map(|s| CallToolResult::success(vec![ContentBlock::text(s)]))
             .map_err(|e| ErrorData::internal_error(format!("序列化失败: {e}"), None))
     }
 
@@ -301,7 +305,7 @@ mod imp {
             &self,
             Parameters(args): Parameters<SearchArgs>,
             ctx: RequestContext<RoleServer>,
-        ) -> Result<Json<Value>, ErrorData> {
+        ) -> Result<CallToolResult, ErrorData> {
             let AxumJson(mut notes) = crate::api::search(
                 State(self.state.clone()),
                 Extension(access_of(&ctx)),
@@ -320,7 +324,7 @@ mod imp {
             &self,
             Parameters(args): Parameters<NoteIdArgs>,
             ctx: RequestContext<RoleServer>,
-        ) -> Result<Json<Value>, ErrorData> {
+        ) -> Result<CallToolResult, ErrorData> {
             let AxumJson(note) = crate::api::note_detail(
                 State(self.state.clone()),
                 Extension(access_of(&ctx)),
@@ -339,7 +343,7 @@ mod imp {
             &self,
             Parameters(args): Parameters<ListNotesArgs>,
             ctx: RequestContext<RoleServer>,
-        ) -> Result<Json<Value>, ErrorData> {
+        ) -> Result<CallToolResult, ErrorData> {
             let AxumJson(notes) = crate::api::notes_list(
                 State(self.state.clone()),
                 Extension(access_of(&ctx)),
@@ -356,7 +360,7 @@ mod imp {
         async fn list_folders(
             &self,
             ctx: RequestContext<RoleServer>,
-        ) -> Result<Json<Value>, ErrorData> {
+        ) -> Result<CallToolResult, ErrorData> {
             let AxumJson(tree) =
                 crate::api::folders(State(self.state.clone()), Extension(access_of(&ctx))).await;
             json_of(tree)
@@ -369,7 +373,7 @@ mod imp {
         async fn list_tags(
             &self,
             ctx: RequestContext<RoleServer>,
-        ) -> Result<Json<Value>, ErrorData> {
+        ) -> Result<CallToolResult, ErrorData> {
             let AxumJson(tags) =
                 crate::api::tags_list(State(self.state.clone()), Extension(access_of(&ctx))).await;
             json_of(tags)
@@ -383,7 +387,7 @@ mod imp {
             &self,
             Parameters(args): Parameters<TagIdArgs>,
             ctx: RequestContext<RoleServer>,
-        ) -> Result<Json<Value>, ErrorData> {
+        ) -> Result<CallToolResult, ErrorData> {
             let AxumJson(notes) = crate::api::tag_notes(
                 State(self.state.clone()),
                 Extension(access_of(&ctx)),
@@ -403,7 +407,7 @@ mod imp {
             &self,
             Parameters(args): Parameters<CreateNoteArgs>,
             ctx: RequestContext<RoleServer>,
-        ) -> Result<Json<Value>, ErrorData> {
+        ) -> Result<CallToolResult, ErrorData> {
             deny_read_only(&self.state)?;
             require_full(access_of(&ctx))?;
             let AxumJson(note) = crate::api::create_note(
@@ -428,7 +432,7 @@ mod imp {
             &self,
             Parameters(args): Parameters<UpdateNoteArgs>,
             ctx: RequestContext<RoleServer>,
-        ) -> Result<Json<Value>, ErrorData> {
+        ) -> Result<CallToolResult, ErrorData> {
             deny_read_only(&self.state)?;
             require_full(access_of(&ctx))?;
             let AxumJson(note) = crate::api::update_note(
@@ -449,7 +453,7 @@ mod imp {
             &self,
             Parameters(args): Parameters<CreateFolderArgs>,
             ctx: RequestContext<RoleServer>,
-        ) -> Result<Json<Value>, ErrorData> {
+        ) -> Result<CallToolResult, ErrorData> {
             deny_read_only(&self.state)?;
             require_full(access_of(&ctx))?;
             let AxumJson(folder) = crate::api::create_folder(
@@ -472,7 +476,7 @@ mod imp {
             &self,
             Parameters(args): Parameters<AddTagArgs>,
             ctx: RequestContext<RoleServer>,
-        ) -> Result<Json<Value>, ErrorData> {
+        ) -> Result<CallToolResult, ErrorData> {
             deny_read_only(&self.state)?;
             require_full(access_of(&ctx))?;
             let AxumJson(tags) = crate::api::add_note_tag(
@@ -493,7 +497,7 @@ mod imp {
             &self,
             Parameters(args): Parameters<RemoveTagArgs>,
             ctx: RequestContext<RoleServer>,
-        ) -> Result<Json<Value>, ErrorData> {
+        ) -> Result<CallToolResult, ErrorData> {
             deny_read_only(&self.state)?;
             require_full(access_of(&ctx))?;
             let AxumJson(tags) = crate::api::remove_note_tag(
@@ -515,7 +519,7 @@ mod imp {
             &self,
             Parameters(args): Parameters<NoteIdArgs>,
             ctx: RequestContext<RoleServer>,
-        ) -> Result<Json<Value>, ErrorData> {
+        ) -> Result<CallToolResult, ErrorData> {
             deny_read_only(&self.state)?;
             require_full(access_of(&ctx))?;
             let code = crate::api::delete_note(State(self.state.clone()), Path(args.id)).await;
@@ -534,7 +538,7 @@ mod imp {
             &self,
             Parameters(args): Parameters<FolderIdArgs>,
             ctx: RequestContext<RoleServer>,
-        ) -> Result<Json<Value>, ErrorData> {
+        ) -> Result<CallToolResult, ErrorData> {
             deny_read_only(&self.state)?;
             require_full(access_of(&ctx))?;
             let code = crate::api::delete_folder(State(self.state.clone()), Path(args.id)).await;
@@ -709,6 +713,22 @@ mod imp {
                 ["add_note_tag", "create_folder", "create_note", "remove_note_tag", "update_note"]
             );
             assert_eq!(get("destructive"), ["delete_folder", "delete_note"]);
+        }
+
+        /// 按 2025-06-18 规范校验的客户端（如 Kimi）要求 outputSchema 根类型是 object，
+        /// 有一个工具不合规，`tools/list` 整体失败、server 连不上。见 [`json_of`]。
+        #[test]
+        fn output_schemas_are_absent_or_object() {
+            for tool in JasperMcp::tool_router().list_all() {
+                if let Some(schema) = &tool.output_schema {
+                    assert_eq!(
+                        schema.get("type").and_then(|t| t.as_str()),
+                        Some("object"),
+                        "工具 {} 的 outputSchema 根类型不是 object: {schema:?}",
+                        tool.name
+                    );
+                }
+            }
         }
     }
 }

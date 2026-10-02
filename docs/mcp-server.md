@@ -106,6 +106,14 @@ MCP 有**自己的一把长效密钥**，与浏览器登录状态完全解耦。
 
 资源（图片/附件）的上传下载没有做成工具——二进制走 MCP 不划算，需要时用 `/api/resources`。
 
+**结果只放文本内容块，不声明 `outputSchema`、不带 `structuredContent`。** 工具返回 rmcp 的
+`Json<T>` 时会自动生成这两样，而 rmcp 3.4 按 SEP-2106 允许它们不是 object：`serde_json::Value`
+生成的 schema 只有 `$schema`、没有 `type`，列表类工具的 `structuredContent` 是数组。按
+2025-06-18 规范校验的客户端（如 Kimi）要求二者是 object，`tools/list` 一校验失败，整个 server
+都连不上（报 `tools[N].outputSchema.type: expected "object"`）；Claude Code 不做这项校验所以
+正常（2026-10 实测踩到）。模型读的本来就是文本内容块，去掉结构化输出对它没有影响。
+测试 `output_schemas_are_absent_or_object` 守住这一点。
+
 ## 鉴权与只读：三道闸
 
 ```
