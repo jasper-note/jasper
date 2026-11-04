@@ -31,6 +31,17 @@
 //! 而 API key 本身就挡住了这类攻击——恶意网页拿不到 key，浏览器也不会自动带上 Bearer 头。
 //! 所以把这道检查挪到 `guard_mcp_access`：**设了 key 不查 Host**；没设 key 时仍只认
 //! 本机地址，外加环境变量 `JASPER_MCP_ALLOWED_HOSTS` 显式放行的地址。rmcp 自己那道关掉。
+//!
+//! ## 断线重连：会话为什么不回 404
+//!
+//! 客户端一旦丢了 server 不会自己恢复（需要客户端重建连接），而官方 TS SDK 收到 404
+//! 只抛错、不重新握手——所以会话在两种情况下都不能回 404（对齐 uni-reader / Perch
+//! 修过的「长时间不用就断开」）：
+//! - **空闲超时**：rmcp 的会话空闲超时默认 5 分钟，到点会话即被清掉。构建时把
+//!   [`LocalSessionManager`] 的 `keep_alive` 关掉，会话随进程一直活着。
+//! - **进程重启**：内存会话表随进程清空。用 [`FileSessionStore`] 把每次 initialize
+//!   的参数落到 config 目录的 `mcp-sessions.json`，rmcp 收到未知会话 id 时会据此
+//!   重放 initialize 握手、把会话原地恢复，而不是回 404。
 
 use crate::api::AppState;
 use axum::Router;
@@ -64,12 +75,16 @@ mod imp {
     use rmcp::model::{CallToolResult, ContentBlock, ProtocolVersion, ServerCapabilities, ServerConfig};
     use rmcp::service::{RequestContext, RoleServer};
     use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+    use rmcp::transport::streamable_http_server::session::store::{
+        SessionState, SessionStore, SessionStoreError,
+    };
     use rmcp::transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService,
     };
     use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
     use schemars::JsonSchema;
     use serde::Deserialize;
+    use std::path::PathBuf;
     use std::sync::atomic::Ordering;
 
     /// 已暴露的工具按标注分三组（设置页展示用）：`read`（read_only_hint）/ `destructive`
@@ -647,17 +662,116 @@ mod imp {
     /// 把 MCP 端点挂进 axum router。service 自带 state（闭包捕获），故不吃 axum 的 State。
     pub(crate) fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         let svc_state = state.clone();
+        let mut session_manager = LocalSessionManager::default();
+        // 会话空闲超时默认 5 分钟：到点会话 worker 退出、会话从内存表移除，之后客户端
+        // 带着旧 Mcp-Session-Id 的请求会吃到 404 —— 而常见客户端（官方 TS SDK）收到 404
+        // 只抛错、不重新握手，表现就是「过一阵不用就连不上、重连失败几次才恢复」。
+        // 关掉空闲超时，让会话随进程一直活着；进程重启的空表由下面的持久化存储兜底。
+        session_manager.session_config.keep_alive = None;
+        let mut http_config = StreamableHttpServerConfig::default().disable_allowed_hosts();
+        // rmcp 默认只放行 Host 为 localhost / 127.0.0.1 / ::1 的请求，带着正确 key 的
+        // 反代域名、局域网 IP 也会被它 403。关掉，改由 guard_mcp_access 按是否设了 key 判断
+        // （见模块文档「Host 检查」）。Origin 检查 rmcp 默认就是关的，不动。
+        match crate::config::config_base_dir() {
+            Ok(dir) => {
+                http_config.session_store = Some(Arc::new(FileSessionStore::open(dir)));
+            }
+            Err(e) => {
+                tracing::warn!("MCP 会话存档不可用（{e}），服务重启后客户端需重新连接");
+            }
+        }
         let service = StreamableHttpService::new(
             move || Ok(JasperMcp::new(svc_state.clone())),
-            Arc::new(LocalSessionManager::default()),
-            // rmcp 默认只放行 Host 为 localhost / 127.0.0.1 / ::1 的请求，带着正确 key 的
-            // 反代域名、局域网 IP 也会被它 403。关掉，改由 guard_mcp_access 按是否设了 key 判断
-            // （见模块文档「Host 检查」）。Origin 检查 rmcp 默认就是关的，不动。
-            StreamableHttpServerConfig::default().disable_allowed_hosts(),
+            Arc::new(session_manager),
+            http_config,
         );
         Router::new()
             .nest_service(crate::api::MCP_PATH, service)
             .layer(axum::middleware::from_fn_with_state(state, guard_mcp_access))
+    }
+
+    /// 持久化的 rmcp 会话存储（`SessionStore` 实现，落在 config 目录的 `mcp-sessions.json`）。
+    ///
+    /// rmcp 的会话表只存在内存里，进程一重启就清空，客户端再带旧的 `Mcp-Session-Id`
+    /// 请求会收到 404 —— 官方 TS SDK 收到 404 不重新握手，MCP 会一直「断开」直到客户端
+    /// 彻底重建连接。把每次 initialize 的参数落盘，rmcp 收到未知会话 id 时会据此把会话
+    /// 原地恢复（重放 initialize 握手）而不是回 404，服务重启对客户端透明。
+    ///
+    /// 条目数有上限（旧的淘汰）；写文件先写临时文件再 rename，中途死掉不留下半个 JSON。
+    struct FileSessionStore {
+        path: PathBuf,
+        /// (session id, 初始化参数)，新的在末尾。客户端通常只有一两枚会话 id，
+        /// 线性查找足够。
+        entries: std::sync::Mutex<Vec<(String, SessionState)>>,
+    }
+
+    /// 最多留多少条会话。只是防异常情况下文件无限增长，正常使用远到不了。
+    const MAX_STORED_SESSIONS: usize = 200;
+
+    impl FileSessionStore {
+        fn open(config_dir: PathBuf) -> Self {
+            let path = config_dir.join("mcp-sessions.json");
+            let entries = std::fs::read_to_string(&path)
+                .map(|raw| {
+                    serde_json::from_str::<Vec<(String, SessionState)>>(&raw)
+                        .map_err(|e| {
+                            tracing::warn!(path = %path.display(), "MCP 会话存档损坏，忽略重来: {e}");
+                            e
+                        })
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default();
+            Self { path, entries: std::sync::Mutex::new(entries) }
+        }
+
+        /// 登记或刷新一条会话（已存在则移到末尾），超上限淘汰最旧的，然后落盘。
+        fn record(&self, session_id: &str, state: &SessionState) {
+            let mut entries = self.entries.lock().unwrap();
+            entries.retain(|(id, _)| id != session_id);
+            entries.push((session_id.to_owned(), state.clone()));
+            let overflow = entries.len().saturating_sub(MAX_STORED_SESSIONS);
+            if overflow > 0 {
+                entries.drain(..overflow);
+            }
+            self.flush(&entries);
+        }
+
+        fn remove(&self, session_id: &str) {
+            let mut entries = self.entries.lock().unwrap();
+            let before = entries.len();
+            entries.retain(|(id, _)| id != session_id);
+            if entries.len() != before {
+                self.flush(&entries);
+            }
+        }
+
+        fn flush(&self, entries: &[(String, SessionState)]) {
+            let Ok(raw) = serde_json::to_string(entries) else { return };
+            let tmp = self.path.with_extension("json.tmp");
+            if std::fs::write(&tmp, raw).is_ok() {
+                if let Err(e) = std::fs::rename(&tmp, &self.path) {
+                    tracing::warn!(path = %self.path.display(), "MCP 会话存档落盘失败: {e}");
+                }
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SessionStore for FileSessionStore {
+        async fn load(&self, session_id: &str) -> Result<Option<SessionState>, SessionStoreError> {
+            let entries = self.entries.lock().unwrap();
+            Ok(entries.iter().rev().find(|(id, _)| id == session_id).map(|(_, s)| s.clone()))
+        }
+
+        async fn store(&self, session_id: &str, state: &SessionState) -> Result<(), SessionStoreError> {
+            self.record(session_id, state);
+            Ok(())
+        }
+
+        async fn delete(&self, session_id: &str) -> Result<(), SessionStoreError> {
+            self.remove(session_id);
+            Ok(())
+        }
     }
 
     #[cfg(test)]
@@ -729,6 +843,77 @@ mod imp {
                     );
                 }
             }
+        }
+
+        fn test_state(client: &str) -> SessionState {
+            // InitializeRequestParams 是 #[non_exhaustive]，只能反序列化出来
+            serde_json::from_str::<SessionState>(&format!(
+                r#"{{"initialize_params":{{"protocolVersion":"2025-03-26","capabilities":{{}},"clientInfo":{{"name":"{client}","version":"0"}}}}}}"#
+            ))
+            .unwrap()
+        }
+
+        fn temp_config_dir(tag: &str) -> PathBuf {
+            let dir = std::env::temp_dir()
+                .join(format!("jasper-mcp-store-test-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+
+        /// 测试是同步的，临时起一个 runtime 调 async 的 `load`。
+        fn load_now(store: &FileSessionStore, id: &str) -> Option<SessionState> {
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(store.load(id))
+                .unwrap()
+        }
+
+        /// 重启 = 重新 open 同一个文件：存过的会话要能找回来（rmcp 据此恢复而不是 404）。
+        #[test]
+        fn session_store_survives_reopen() {
+            let dir = temp_config_dir("reopen");
+            FileSessionStore::open(dir.clone()).record("s1", &test_state("a"));
+            let store = FileSessionStore::open(dir);
+            assert_eq!(load_now(&store, "s1").unwrap().initialize_params.client_info.name, "a");
+            assert!(load_now(&store, "nope").is_none());
+        }
+
+        #[test]
+        fn session_store_refresh_moves_to_back_and_evicts_oldest() {
+            let dir = temp_config_dir("evict");
+            let store = FileSessionStore::open(dir);
+            for i in 0..(MAX_STORED_SESSIONS + 1) {
+                store.record(&format!("s{i}"), &test_state("c"));
+            }
+            // 最旧的一条被淘汰，其余都在
+            assert!(load_now(&store, "s0").is_none());
+            assert!(load_now(&store, "s1").is_some());
+            assert!(load_now(&store, &format!("s{MAX_STORED_SESSIONS}")).is_some());
+            // 刷新已存在的 id 不会增加条目数
+            store.record("s1", &test_state("d"));
+            assert_eq!(store.entries.lock().unwrap().len(), MAX_STORED_SESSIONS);
+        }
+
+        #[test]
+        fn session_store_delete_removes_entry() {
+            let dir = temp_config_dir("delete");
+            let store = FileSessionStore::open(dir.clone());
+            store.record("s1", &test_state("a"));
+            store.remove("s1");
+            assert!(load_now(&store, "s1").is_none());
+            // 落盘同步生效
+            let reopened = FileSessionStore::open(dir);
+            assert!(load_now(&reopened, "s1").is_none());
+        }
+
+        /// 存档损坏（写了一半的 JSON）时当成空表起步，不 panic。
+        #[test]
+        fn session_store_tolerates_corrupt_file() {
+            let dir = temp_config_dir("corrupt");
+            std::fs::write(dir.join("mcp-sessions.json"), b"{not json").unwrap();
+            let store = FileSessionStore::open(dir);
+            assert!(load_now(&store, "s1").is_none());
         }
     }
 }

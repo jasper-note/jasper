@@ -47,6 +47,8 @@ genai = { version = "0.6", optional = true }
 # schemars 供工具入参 derive JSON Schema——MCP 客户端据此知道每个工具怎么调。
 rmcp = { version = "3", features = ["transport-streamable-http-server"], optional = true }
 schemars = { version = "1", optional = true }
+# rmcp 的 SessionStore 用 async_trait 声明，实现它就要这个宏
+async-trait = { version = "0.1", optional = true }
 
 [dev-dependencies]
 # 仅测试用：oneshot 把请求灌进 Router 断言只读守卫行为。
@@ -61,7 +63,7 @@ embed = ["dep:rust-embed"]
 plugins = ["dep:wasmi", "dep:zip", "dep:toml", "dep:genai", "jasper-core/serde"]
 # MCP server：把笔记库以 Model Context Protocol 暴露给 Claude Code 等客户端
 # （Streamable HTTP，挂在现有 axum router 的 /mcp 下，复用同一份 handler 与鉴权）。
-mcp = ["dep:rmcp", "dep:schemars"]
+mcp = ["dep:rmcp", "dep:schemars", "dep:async-trait"]
 
 [profile.release]
 opt-level = "z"

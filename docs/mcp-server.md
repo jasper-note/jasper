@@ -195,6 +195,20 @@ MCP 段走既有的 server-driven 设置描述符（`GET /api/settings/schema`�
 前端重拉描述符并重挂该分区，把服务端新生成的 key 回显出来。展示型字段不回传给服务端
 （`buildRequestBody` 会剔除）。
 
+## 会话与断线重连
+
+客户端（Claude Code、Kimi 等，官方 TS SDK）有两个已知行为：丢了 server 不会自己恢复；
+收到 404 只抛错、**不重新握手**。所以 jasper 的会话在两种情况下都不能让客户端吃到 404：
+
+- **空闲超时**：rmcp 的会话空闲超时默认 5 分钟，到点会话即被清掉，之后客户端带旧
+  `Mcp-Session-Id` 的请求一律 404——「过一阵不用就连不上、重连失败几次才恢复」就是它。
+  jasper 构建 `StreamableHttpService` 时把 `LocalSessionManager` 的 `keep_alive` 关掉，
+  会话随进程一直活着。
+- **进程重启**：内存会话表随进程清空。用 `FileSessionStore`（`server/src/mcp.rs`）把每次
+  initialize 的参数落到 config 目录的 `mcp-sessions.json`，rmcp 收到未知会话 id 时会据此
+  重放 initialize 握手、把会话原地恢复，而不是回 404——服务重启、升级对客户端透明。
+  存档最多留 200 条（旧的淘汰），先写临时文件再 rename，损坏时按空表起步。
+
 ## 测试
 
 - `server/src/auth.rs`：`mcp_key_shape_and_constant_time_compare`（前缀/长度/每次新随机、
@@ -210,7 +224,8 @@ MCP 段走既有的 server-driven 设置描述符（`GET /api/settings/schema`�
     403；设了 key：同样的 Host 带 key 握手 200（断言的是 200 而非「不是 401」，rmcp 自带的
     Host 检查没关掉这里就会失败）
 - `server/src/mcp.rs`：`strip_port`（域名/IPv4/带方括号与裸 IPv6）、`host_allowed` 与
-  `JASPER_MCP_ALLOWED_HOSTS` 解析（带不带端口、大小写、`*`）、`tool_groups` 按标注分组且不漏工具。
+  `JASPER_MCP_ALLOWED_HOSTS` 解析（带不带端口、大小写、`*`）、`tool_groups` 按标注分组且不漏工具、
+  `FileSessionStore` 重启找回/刷新保序/超限淘汰/删除落盘/损坏容错。
 - `web/src/lib/settingsSchema.test.ts`：占位符填充、无 token 时不留空 Authorization 头、
   `truthy:false` 显隐、展示型字段（含 chips）不进请求体、`maskSecrets` 遮挡、`actionsFor`
   按字段拆分动作、`chipGroups` 容错。
